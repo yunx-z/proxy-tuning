@@ -38,7 +38,7 @@ def main(args):
             example = json.loads(line)
             test_data.append({
                 "question": example["question"],
-                "answer": example["answer"].split("####")[1].strip()
+                "answer": str(example["answer"]).split("####")[-1].strip()
             })
 
     # some numbers are in the `x,xxx` format, and we want to remove the comma
@@ -47,25 +47,26 @@ def main(args):
         assert float(example["answer"]), f"answer is not a valid number: {example['answer']}"
 
     if args.max_examples and len(test_data) > args.max_examples:
-        test_data = random.sample(test_data, args.max_examples)
+        # test_data = random.sample(test_data, args.max_examples)
+        test_data = test_data[:args.max_examples]
 
     ensure_dir(args.save_dir)
 
-    prompt_prefix = "Answer the following question.\n\n"
+    prompt_prefix = "Solve the following math problem. Put your final answer within \\boxed{}.\n\n"
 
     prompts = []
     chat_formatting_function = dynamic_import_function(args.chat_formatting_function) if args.use_chat_format else None
     for example in test_data:
         prompt = prompt_prefix + "Question: " + example["question"].strip()
-        if args.use_chat_format:
-            messages = [{"role": "user", "content": prompt}]
-            prompt = chat_formatting_function(messages, add_bos=False)
-            if prompt[-1] in ["\n", " "]:
-                prompt += "Answer:"
-            else:
-                prompt += " Answer:"
-        else:
-            prompt += "\nAnswer:"
+        # if args.use_chat_format:
+        #     messages = [{"role": "user", "content": prompt}]
+        #     prompt = chat_formatting_function(messages, add_bos=False)
+        #     if prompt[-1] in ["\n", " "]:
+        #         prompt += "Answer:"
+        #     else:
+        #         prompt += " Answer:"
+        # else:
+        #     prompt += "\nAnswer:"
         prompts.append(prompt)
 
     with open(os.path.join(args.save_dir, "example_prompt.txt"), 'w') as fout:
@@ -83,21 +84,23 @@ def main(args):
         model, tokenizer = load_dexperts_model_and_tokenizer(
             args.base_model_name_or_path,
             args.expert_model_name_or_path,
+            args.anti_expert_model_name_or_path,
             chat_response_prefix="Answer:",
             load_in_8bit=args.load_in_8bit,
             use_fast_tokenizer=not args.use_slow_tokenizer,
         )
+    print("Finish loading model and tokenizer!")
 
     outputs = generate_completions(
         model=model,
         tokenizer=tokenizer,
         prompts=prompts,
-        max_new_tokens=512,
+        max_new_tokens=4096,
         batch_size=args.eval_batch_size,
         do_sample=False,
     )
 
-    outputs = [trim_output(o) for o in outputs]
+    # outputs = [trim_output(o) for o in outputs]
 
     predictions = []
     for output in outputs:
@@ -187,6 +190,11 @@ if __name__ == "__main__":
         "--expert_model_name_or_path",
         type=str,
         default='meta-llama/Llama-2-7b-chat-hf',
+    )
+    parser.add_argument(
+        "--anti_expert_model_name_or_path",
+        type=str,
+        default='meta-llama/Llama-2-7b-hf',
     )
     parser.add_argument(
         "--system_prompt",

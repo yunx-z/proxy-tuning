@@ -193,11 +193,12 @@ def load_dexperts_model_and_tokenizer(
     model_kwargs = {
         'device_map': device_map,
         'offload_folder': 'offload_folder',
-        'torch_dtype': torch.float16,
+        'torch_dtype': torch.bfloat16,
         'offload_state_dict': True,
         'load_in_8bit': load_in_8bit,
     }
 
+    print(f"Loading tokenizer from: {base_model_name_or_path}")
     tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path, use_fast_tokenizer=use_fast_tokenizer)
     tokenizer = add_pad_token(tokenizer, padding_side)
     if not antiexpert_model_name_or_path:
