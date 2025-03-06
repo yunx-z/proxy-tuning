@@ -186,6 +186,7 @@ def load_dexperts_model_and_tokenizer(
     load_in_8bit: bool = False,
     use_fast_tokenizer: bool = True,
     padding_side: str = "left",
+    log_file: str = None,
 ):
     from transformers import AutoTokenizer
     from modeling.dexperts import DExpertsLlama
@@ -213,6 +214,7 @@ def load_dexperts_model_and_tokenizer(
         alpha=alpha,
         chat_response_prefix=chat_response_prefix,
         model_kwargs=model_kwargs,
+        log_file=log_file,
     )
 
     return model, tokenizer

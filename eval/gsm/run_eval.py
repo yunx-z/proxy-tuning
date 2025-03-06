@@ -88,6 +88,7 @@ def main(args):
             chat_response_prefix="Answer:",
             load_in_8bit=args.load_in_8bit,
             use_fast_tokenizer=not args.use_slow_tokenizer,
+            log_file=os.path.join(args.save_dir, "logits.log")
         )
     print("Finish loading model and tokenizer!")
 

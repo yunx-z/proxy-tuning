@@ -29,13 +29,13 @@ python -m eval.gsm.run_eval \
     --anti_expert_model_name_or_path ${small_base_model} \
     --eval_batch_size ${batch_sz}
 
-for model in "${models[@]}"; do
-	results_dir="results/${dataset}/${model//\//_}"
-	echo "Results dir: ${results_dir}"
-	python -m eval.gsm.run_eval \
-	    --max_examples 1 \
-	    --data_dir ${my_data_dir} \
-	    --save_dir ${results_dir} \
-	    --model_name_or_path ${model} \
-	    --eval_batch_size ${batch_sz}
-done
+# for model in "${models[@]}"; do
+# 	results_dir="results/${dataset}/${model//\//_}"
+# 	echo "Results dir: ${results_dir}"
+# 	python -m eval.gsm.run_eval \
+# 	    --max_examples 1 \
+# 	    --data_dir ${my_data_dir} \
+# 	    --save_dir ${results_dir} \
+# 	    --model_name_or_path ${model} \
+# 	    --eval_batch_size ${batch_sz}
+# done
