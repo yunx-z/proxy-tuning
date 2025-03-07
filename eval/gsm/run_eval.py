@@ -3,7 +3,6 @@ import os
 import re
 import json
 import random
-import evaluate
 from eval.utils import (
     generate_completions,
     load_lm_and_tokenizer,
@@ -11,9 +10,8 @@ from eval.utils import (
     dynamic_import_function,
     ensure_dir
 )
-
-
-exact_match = evaluate.load("exact_match")
+from eval.math_util import my_answer_extraction
+from eval.math_equivalence import is_equiv
 
 
 def trim_output(output):
@@ -38,16 +36,10 @@ def main(args):
             example = json.loads(line)
             test_data.append({
                 "question": example["question"],
-                "answer": str(example["answer"]).split("####")[-1].strip()
+                "answer": str(example["answer"])
             })
 
-    # some numbers are in the `x,xxx` format, and we want to remove the comma
-    for example in test_data:
-        example["answer"] = re.sub(r"(\d),(\d)", r"\1\2", example["answer"])
-        assert float(example["answer"]), f"answer is not a valid number: {example['answer']}"
-
     if args.max_examples and len(test_data) > args.max_examples:
-        # test_data = random.sample(test_data, args.max_examples)
         test_data = test_data[:args.max_examples]
 
     ensure_dir(args.save_dir)
@@ -58,15 +50,6 @@ def main(args):
     chat_formatting_function = dynamic_import_function(args.chat_formatting_function) if args.use_chat_format else None
     for example in test_data:
         prompt = prompt_prefix + "Question: " + example["question"].strip()
-        # if args.use_chat_format:
-        #     messages = [{"role": "user", "content": prompt}]
-        #     prompt = chat_formatting_function(messages, add_bos=False)
-        #     if prompt[-1] in ["\n", " "]:
-        #         prompt += "Answer:"
-        #     else:
-        #         prompt += " Answer:"
-        # else:
-        #     prompt += "\nAnswer:"
         prompts.append(prompt)
 
     with open(os.path.join(args.save_dir, "example_prompt.txt"), 'w') as fout:
@@ -88,7 +71,8 @@ def main(args):
             chat_response_prefix="Answer:",
             load_in_8bit=args.load_in_8bit,
             use_fast_tokenizer=not args.use_slow_tokenizer,
-            log_file=os.path.join(args.save_dir, "logits.log")
+            log_file=os.path.join(args.save_dir, "logits.log"),
+            alpha_strategy=args.alpha_strategy
         )
     print("Finish loading model and tokenizer!")
 
@@ -96,27 +80,18 @@ def main(args):
         model=model,
         tokenizer=tokenizer,
         prompts=prompts,
-        max_new_tokens=4096,
+        max_new_tokens=args.max_new_tokens,
         batch_size=args.eval_batch_size,
         do_sample=False,
     )
 
-    # outputs = [trim_output(o) for o in outputs]
 
-    predictions = []
-    for output in outputs:
-        # replace numbers like `x,xxx` with `xxxx`
-        output = re.sub(r"(\d),(\d)", r"\1\2", output)
-        numbers = re.findall(r"[-+]?\d*\.\d+|\d+", output)
-        if numbers:
-            predictions.append(numbers[-1])
-        else:
-            predictions.append(output)
-
-    print("Calculating accuracy...")
+    predictions = [my_answer_extraction(output) for output in outputs]
     targets = [example["answer"] for example in test_data]
+    assert len(predictions) == len(targets)
 
-    em_score = exact_match.compute(predictions=predictions, references=targets, ignore_case=True, ignore_punctuation=True)["exact_match"]
+    em_score = sum([int(is_equiv(pred, answer)) for pred, answer in zip(predictions, targets)]) / len(targets)
+
     print(f"Exact match : {em_score}")
 
     predictions = [{
@@ -158,7 +133,7 @@ if __name__ == "__main__":
         "--model_name_or_path",
         type=str,
         default=None,
-        help="if specified, we will load the model to generate the predictions."
+        help="DEPRECATED if specified, we will load the model to generate the predictions."
     )
     parser.add_argument(
         "--tokenizer_name_or_path",
@@ -178,6 +153,11 @@ if __name__ == "__main__":
         help="batch size for evaluation."
     )
     parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        help="max generation tokens"
+    )
+    parser.add_argument(
         "--load_in_8bit",
         action="store_true",
         help="load model in 8bit mode, which will reduce memory and speed up inference."
@@ -185,20 +165,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base_model_name_or_path",
         type=str,
-        default='meta-llama/Llama-2-13b-hf',
     )
     parser.add_argument(
         "--expert_model_name_or_path",
         type=str,
-        default='meta-llama/Llama-2-7b-chat-hf',
+        default=None,
     )
     parser.add_argument(
         "--anti_expert_model_name_or_path",
         type=str,
-        default='meta-llama/Llama-2-7b-hf',
+        default=None,
     )
     parser.add_argument(
         "--system_prompt",
+        type=str,
+        default=None
+    )
+    parser.add_argument(
+        "--alpha_strategy",
         type=str,
         default=None
     )

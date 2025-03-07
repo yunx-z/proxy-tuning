@@ -44,8 +44,8 @@ def generate_completions(
     banned_begin_ids=None,
     add_special_tokens=True,
     disable_tqdm=False,
-    temperature=1.0,
-    top_p=1.0,
+    temperature=0.3,
+    top_p=0.85,
     **generation_kwargs
 ):
     generations = []
@@ -178,7 +178,7 @@ def add_pad_token(tokenizer, padding_side="left"):
 def load_dexperts_model_and_tokenizer(
     base_model_name_or_path: str,
     expert_model_name_or_path: str,
-    antiexpert_model_name_or_path: str = None,
+    antiexpert_model_name_or_path: str,
     device_map: str = "auto",
     system_prompt: str = None,
     alpha: float = 1.0,
@@ -187,6 +187,7 @@ def load_dexperts_model_and_tokenizer(
     use_fast_tokenizer: bool = True,
     padding_side: str = "left",
     log_file: str = None,
+    alpha_strategy: str = None,
 ):
     from transformers import AutoTokenizer
     from modeling.dexperts import DExpertsLlama
@@ -202,8 +203,6 @@ def load_dexperts_model_and_tokenizer(
     print(f"Loading tokenizer from: {base_model_name_or_path}")
     tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path, use_fast_tokenizer=use_fast_tokenizer)
     tokenizer = add_pad_token(tokenizer, padding_side)
-    if not antiexpert_model_name_or_path:
-        antiexpert_model_name_or_path = 'meta-llama/Llama-2-7b-hf'
 
     model = DExpertsLlama(
         base_model_name_or_path=base_model_name_or_path,
@@ -215,6 +214,7 @@ def load_dexperts_model_and_tokenizer(
         chat_response_prefix=chat_response_prefix,
         model_kwargs=model_kwargs,
         log_file=log_file,
+        alpha_strategy=alpha_strategy,
     )
 
     return model, tokenizer

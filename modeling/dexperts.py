@@ -1,4 +1,6 @@
 import sys
+import random
+import os
 import json
 from typing import Optional, Dict, Any
 import torch
@@ -36,6 +38,7 @@ class DExpertsLlama:
         chat_response_prefix: str = None,
         model_kwargs: Dict[str, Any] = None,
         log_file: Optional[str] = None,
+        alpha_strategy: str = None,
     ):
         """
         chat_response_prefix: For llama chat models, it can be helpful for the response
@@ -46,16 +49,22 @@ class DExpertsLlama:
         self.base = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path, **model_kwargs
         )
-        self.expert = AutoModelForCausalLM.from_pretrained(
-            expert_model_name_or_path, **model_kwargs
-        )
-        self.antiexpert = AutoModelForCausalLM.from_pretrained(
-            antiexpert_model_name_or_path, **model_kwargs
-        )
-
         self.base.eval()
-        self.expert.eval()
-        self.antiexpert.eval()
+        if expert_model_name_or_path:
+            self.expert = AutoModelForCausalLM.from_pretrained(
+                expert_model_name_or_path, **model_kwargs
+            )
+            self.expert.eval()
+        else:
+            self.expert = None
+        if antiexpert_model_name_or_path:
+            self.antiexpert = AutoModelForCausalLM.from_pretrained(
+                antiexpert_model_name_or_path, **model_kwargs
+            )
+            self.antiexpert.eval()
+        else:
+            self.antiexpert = None
+
 
         self.tokenizer = tokenizer
         # Although the original 'alpha' constructor argument is retained, we  
@@ -67,7 +76,7 @@ class DExpertsLlama:
         self.chat_response_prefix = chat_response_prefix
 
         # Llama chat experts need different formatting
-        self.use_chat_format_for_expert = True if 'chat' in expert_model_name_or_path.lower() else False
+        self.use_chat_format_for_expert = True if expert_model_name_or_path and 'chat' in expert_model_name_or_path.lower() else False
 
         if self.use_chat_format_for_expert:
             # chat_prefix goes before the query, and chat_suffix goes after it
@@ -91,6 +100,11 @@ class DExpertsLlama:
   
         # If provided, we will log JSON lines to this file  
         self.log_file = log_file  
+        if os.path.exists(self.log_file):
+            os.remove(self.log_file)
+
+        self.alpha_strategy = alpha_strategy
+
   
 
     def forward(
@@ -196,7 +210,6 @@ class DExpertsLlama:
         """  
         Modified generate method to:  
           - dynamically toggle alpha between 0 and 1 based on a finite-state machine  
-          - skip expert/anti-expert computations when alpha=0  
           - log JSON lines of top-10 tokens/logits each step to self.log_file  
         """  
         base_kwargs = kwargs.copy()
@@ -259,50 +272,48 @@ class DExpertsLlama:
             # 1) Prepare base inputs (always needed for forward)  
             # ------------------------------------------------  
             base_inputs = self.base.prepare_inputs_for_generation(input_ids, **base_kwargs)  
-  
+
             # ------------------------------------------------  
             # 2) Compute base logits  
             # ------------------------------------------------  
             base_outputs = self.base(**base_inputs, return_dict=True)  
             base_next_token_logits = base_outputs.logits[..., -1, :]  
   
-            # ------------------------------------------------  
-            # If alpha=0, skip expert/anti-expert to save compute  
-            # If alpha=1, compute as before  
-            # ------------------------------------------------  
-            if self.alpha == 1:  
-                # prepare inputs for experts  
-                # note: for anti-expert we use input_ids (not chat formatting)  
+            # prepare inputs for experts  
+            # note: for anti-expert we use input_ids (not chat formatting)  
+            if self.expert and self.antiexpert:
                 expert_inputs = self.expert.prepare_inputs_for_generation(expert_input_ids, **expert_kwargs)  
                 antiexpert_inputs = self.antiexpert.prepare_inputs_for_generation(input_ids, **antiexpert_kwargs)  
-                print('='*50, f"step {gen_steps}")
-                print("expert_inputs", expert_inputs)
- 
+                # It won't save computation by skipping expert generation when alpha is zero,
+                # because once alpha is changed to 1, we still need to compute key-value for all previously skipped tokens
+
                 # forward pass for experts  
                 expert_outputs = self.expert(**expert_inputs, return_dict=True)  
                 antiexpert_outputs = self.antiexpert(**antiexpert_inputs, return_dict=True)  
-  
                 expert_next_token_logits = expert_outputs.logits[..., -1, :]  
                 antiexpert_next_token_logits = antiexpert_outputs.logits[..., -1, :]  
-  
-                # in case expert logits are larger dimension  
-                expert_next_token_logits = expert_next_token_logits[:, : base_next_token_logits.shape[-1]]  
-                # DExperts formula  
-                dexperts_next_token_logits = (  
-                    base_next_token_logits  
-                    + self.initial_alpha  
-                    * (expert_next_token_logits - antiexpert_next_token_logits)  
-                )  
-            else:  
-                # alpha=0 => no difference  
-                dexperts_next_token_logits = None  
+
+            # else:  
+            # alpha=0 => no difference  
   
             # ------------------------------------------------  
             # 3) Determine final next_token_logits for sampling  
             # ------------------------------------------------  
-            if self.alpha == 1:  
-                next_token_logits = dexperts_next_token_logits  
+            if self.alpha == 1 and self.expert and self.antiexpert:  
+
+                vocab_size = self.tokenizer.vocab_size + 3 # include eos, user, assistant special token
+                # Copy the base logits so that tokens beyond vocab_size remain unchanged.
+                dexperts_next_token_logits = base_next_token_logits.clone()
+
+                # Only update the first vocab_size logits.
+                dexperts_next_token_logits[:, :vocab_size] = (
+                    base_next_token_logits[:, :vocab_size] +
+                    self.initial_alpha * (expert_next_token_logits[:, :vocab_size] - antiexpert_next_token_logits[:, :vocab_size])
+                )
+
+                next_token_logits = dexperts_next_token_logits 
             else:  
+                dexperts_next_token_logits = None  
                 next_token_logits = base_next_token_logits  # alpha=0 => use base only  
   
             # pre-process logits if needed  
@@ -354,7 +365,7 @@ class DExpertsLlama:
                     "dexperts": next_token_logits,  
                     "base": base_next_token_logits,  
                 }  
-                if self.alpha == 1:  
+                if self.expert and self.antiexpert:
                     next_token_logits_dict["expert"] = expert_next_token_logits  
                     next_token_logits_dict["antiexpert"] = antiexpert_next_token_logits  
   
@@ -376,7 +387,7 @@ class DExpertsLlama:
   
             # update model kwargs to include past / attention_mask  
             base_kwargs = self._update_model_kwargs_for_generation(base_outputs, base_kwargs)  
-            if self.alpha == 1:  
+            if self.expert and self.antiexpert:
                 expert_kwargs = self._update_model_kwargs_for_generation(expert_outputs, expert_kwargs)  
                 antiexpert_kwargs = self._update_model_kwargs_for_generation(  
                     antiexpert_outputs, antiexpert_kwargs  
@@ -403,7 +414,7 @@ class DExpertsLlama:
             #    (only if alpha=1 => system 2)  
             # ------------------------------------------------  
             overriding_event_occurred = False  
-            if self.alpha == 1:  
+            if self.alpha == 1 and self.expert and self.antiexpert:  
                 # compare base model's argmax vs. dexperts argmax on first example  
                 base_top1 = torch.argmax(base_next_token_logits[0], dim=-1)  
                 dexperts_top1 = torch.argmax(dexperts_next_token_logits[0], dim=-1)  
@@ -413,10 +424,11 @@ class DExpertsLlama:
             # ------------------------------------------------  
             # 9) force answer generation when max_generaiton_token limit is hit
             # ------------------------------------------------  
+            gen_steps += 1
  
             # If we've generated exactly max_new_tokens and haven't added the extra prompt, append it.
             if gen_steps == max_new_tokens and not extra_prompt_appended:
-                extra_prompt = "\nI'm not allowed to think more so I have to conclude that the final answer is: \\boxed"
+                extra_prompt = "\nI'm not allowed to think more so I have to conclude that the final answer is:"
                 extra_input = self.tokenizer(extra_prompt, return_tensors="pt").input_ids.to(input_ids.device)
                 # Ensure the extra prompt is broadcasted to all sequences if needed.
                 if extra_input.shape[0] == 1 and input_ids.shape[0] > 1:
@@ -428,12 +440,13 @@ class DExpertsLlama:
                 if "attention_mask" in base_kwargs:
                     extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=base_kwargs["attention_mask"].dtype)
                     base_kwargs["attention_mask"] = torch.cat([base_kwargs["attention_mask"], extra_attention], dim=-1)
-                # if "attention_mask" in expert_kwargs:
-                #     extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=expert_kwargs["attention_mask"].dtype)
-                #     expert_kwargs["attention_mask"] = torch.cat([expert_kwargs["attention_mask"], extra_attention], dim=-1)
-                # if "attention_mask" in antiexpert_kwargs:
-                #     extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=antiexpert_kwargs["attention_mask"].dtype)
-                #     antiexpert_kwargs["attention_mask"] = torch.cat([antiexpert_kwargs["attention_mask"], extra_attention], dim=-1)
+                if self.expert and self.antiexpert:
+                    if "attention_mask" in expert_kwargs:
+                        extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=expert_kwargs["attention_mask"].dtype)
+                        expert_kwargs["attention_mask"] = torch.cat([expert_kwargs["attention_mask"], extra_attention], dim=-1)
+                    if "attention_mask" in antiexpert_kwargs:
+                        extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=antiexpert_kwargs["attention_mask"].dtype)
+                        antiexpert_kwargs["attention_mask"] = torch.cat([antiexpert_kwargs["attention_mask"], extra_attention], dim=-1)
 
                 # Increase the allowed generation steps by 100.
                 allowed_gen_steps += 100
@@ -443,13 +456,26 @@ class DExpertsLlama:
             # 10) Update the finite state machine  
             # ------------------------------------------------  
             # self._update_phase(overriding_event_occurred, extra_prompt_appended)  
-            # DEBUG
-            self.alpha = 0 if gen_steps < 100 else 1
+            # self.alpha = 0 if gen_steps < 100 or extra_prompt_appended else 1
+            if gen_steps < 100 or extra_prompt_appended:
+                self.alpha = 0
+            else:
+                if self.alpha_strategy is None or self.alpha_strategy == "constant":
+                    self.alpha = 1
+                elif self.alpha_strategy.startswith("cycle"):
+                    # cycle100
+                    T = int(self.alpha_strategy.replace("cycle", "")) 
+                    self.alpha = (gen_steps // T) % 2
+                elif self.alpha_strategy.startswith("random"):
+                    # random0.5
+                    prob = float(self.alpha_strategy.replace("random", ""))
+                    self.alpha = 1 if random.random() < prob else 0
+                else:
+                    raise ValueError(f"invalid alpha_strategy: {self.alpha_strategy}")
   
             # track how many steps in the current phase  
             self.phase_step_count += 1  
 
-            gen_steps += 1
 
 
         if return_logits_for_analysis:
