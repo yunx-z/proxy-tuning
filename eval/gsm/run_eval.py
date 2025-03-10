@@ -72,6 +72,7 @@ def main(args):
             load_in_8bit=args.load_in_8bit,
             use_fast_tokenizer=not args.use_slow_tokenizer,
             log_file=os.path.join(args.save_dir, "logits.log"),
+            alpha=args.alpha,
             alpha_strategy=args.alpha_strategy
         )
     print("Finish loading model and tokenizer!")
@@ -82,7 +83,7 @@ def main(args):
         prompts=prompts,
         max_new_tokens=args.max_new_tokens,
         batch_size=args.eval_batch_size,
-        do_sample=False,
+        do_sample=True,
     )
 
 
@@ -123,6 +124,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="maximum number of examples to evaluate."
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=1.0,
+        help="initial alpha"
     )
     parser.add_argument(
         "--save_dir",

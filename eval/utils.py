@@ -44,8 +44,8 @@ def generate_completions(
     banned_begin_ids=None,
     add_special_tokens=True,
     disable_tqdm=False,
-    temperature=0.3,
-    top_p=0.85,
+    temperature=0.6,
+    top_p=0.95,
     **generation_kwargs
 ):
     generations = []

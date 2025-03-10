@@ -1,0 +1,78 @@
+import json
+import os
+import glob
+import numpy as np
+
+from eval.custom_counter import count_frequencies_with_custom_equal
+from eval.math_equivalence import is_equiv
+
+large_size="7"
+small_size="1.5"
+large_base_model=f"Qwen_Qwen2.5-Math-{large_size}B"
+large_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{large_size}B"
+small_base_model=f"Qwen_Qwen2.5-Math-{small_size}B"
+small_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{small_size}B"
+alpha_strategies = ["constant", "cycle100", "random0.5"] 
+models = [small_base_model, small_expert_model, large_base_model, large_expert_model]
+models += [f"dexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+
+def get_data_items(data_file):
+    with open(data_file, 'r') as reader:
+        data_items = [json.loads(l) for l in reader]
+    for item in data_items:
+        item["answer"] = str(item["answer"])
+        item["preds"] = list()
+    return data_items
+
+
+def pass_at_k(data_items, k):
+    """Estimates pass@k of each problem and returns them in an array."""
+
+    def estimator(n: int, c: int, k: int) -> float:
+        """Calculates 1 - comb(n - c, k) / comb(n, k)."""
+        if n - c < k:
+            return 1.0
+        return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
+    
+    n = len(data_items[0]['preds'])
+    pass_at_k_items = []
+    for item in data_items:
+        assert n == len(item['preds'])
+        c = sum([int(is_equiv(pred, item['answer'])) for pred in item['preds']])
+        pass_at_k_items.append(estimator(n, c, k))
+    return sum(pass_at_k_items) / len(pass_at_k_items)
+
+
+def majority(data_items):
+    maj_correct_scores = list()
+    for item in data_items:
+        pred_answer_frequencies = count_frequencies_with_custom_equal(item['preds'], is_equiv)
+        voted_answer = pred_answer_frequencies[0][0]
+        maj_correct_score = int(is_equiv(voted_answer, item["answer"]))
+        maj_correct_scores.append(maj_correct_score)
+    return sum(maj_correct_scores) / len(maj_correct_scores)
+
+def main():
+    for dataset in ["aime2024", "aime2025", "MATH100"]:
+        data_file = f"data/eval/{dataset}/test.jsonl"
+
+        for model in models:
+            data_items = get_data_items(data_file)
+
+            pattern = f"results/{dataset}/{model}/*/predictions.jsonl"
+            for file_path in glob.glob(pattern):
+                with open(file_path, 'r') as reader:
+                    pred_items = [json.loads(l) for l in reader]
+                assert len(pred_items) == len(data_items)
+                for pred_item, data_item in zip(pred_items, data_items):
+                    data_item["preds"].append(pred_item["prediction"])
+            
+            k = len(data_items[0]["preds"])
+            pass_at_1 = pass_at_k(data_items, k=1)
+            majority_at_k = majority(data_items)
+            print(f"{dataset}\t{model}\tpass@1={pass_at_1*100:.2f}\tmaj@{k}={majority_at_k*100:.2f}")
+
+
+
+if __name__ == "__main__":
+    main()

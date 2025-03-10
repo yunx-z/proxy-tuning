@@ -455,7 +455,6 @@ class DExpertsLlama:
             # ------------------------------------------------  
             # 10) Update the finite state machine  
             # ------------------------------------------------  
-            # self._update_phase(overriding_event_occurred, extra_prompt_appended)  
             # self.alpha = 0 if gen_steps < 100 or extra_prompt_appended else 1
             if gen_steps < 100 or extra_prompt_appended:
                 self.alpha = 0
@@ -466,10 +465,23 @@ class DExpertsLlama:
                     # cycle100
                     T = int(self.alpha_strategy.replace("cycle", "")) 
                     self.alpha = (gen_steps // T) % 2
+                elif self.alpha_strategy.startswith("2cycles"):
+                    # 2cycles-400-100
+                    items = self.alpha_strategy.split('-')
+                    T0 = int(items[1])
+                    T1 = int(items[2])
+                    assert T0 % 100 == 0
+                    assert T1 % 100 == 0
+                    if (gen_steps // 100) % (T0 // 100 + T1 // 100) < (T0 // 100):
+                        self.alpha = 0
+                    else:
+                        self.alpha = 1
                 elif self.alpha_strategy.startswith("random"):
                     # random0.5
                     prob = float(self.alpha_strategy.replace("random", ""))
                     self.alpha = 1 if random.random() < prob else 0
+                elif self.alpha_strategy == "override_annealing":
+                    self._update_phase(overriding_event_occurred, extra_prompt_appended)  
                 else:
                     raise ValueError(f"invalid alpha_strategy: {self.alpha_strategy}")
   
