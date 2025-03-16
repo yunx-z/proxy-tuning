@@ -83,7 +83,7 @@ def main(args):
         prompts=prompts,
         max_new_tokens=args.max_new_tokens,
         batch_size=args.eval_batch_size,
-        do_sample=True,
+        do_sample=args.do_sample,
     )
 
 
@@ -113,6 +113,16 @@ def main(args):
 
 
 if __name__ == "__main__":
+    def str_to_bool(value):
+        if isinstance(value, bool):  # If already a bool, return it directly
+            return value
+        if value.lower() in ("true", "1", "yes", "t"):
+            return True
+        elif value.lower() in ("false", "0", "no", "f"):
+            return False
+        else:
+            raise argparse.ArgumentTypeError("Boolean value expected (True/False).")
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data_dir",
@@ -197,6 +207,12 @@ if __name__ == "__main__":
         "--use_chat_format",
         action="store_true",
         help="If given, we will use the chat format for the prompts."
+    )
+    parser.add_argument(
+        "--do_sample",
+        type=str_to_bool,
+        required=True,
+        help="sample (True) or greedy (False)"
     )
     parser.add_argument(
         "--chat_formatting_function",

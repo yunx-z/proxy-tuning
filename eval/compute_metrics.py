@@ -6,15 +6,21 @@ import numpy as np
 from eval.custom_counter import count_frequencies_with_custom_equal
 from eval.math_equivalence import is_equiv
 
-large_size="7"
 small_size="1.5"
-large_base_model=f"Qwen_Qwen2.5-Math-{large_size}B"
-large_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{large_size}B"
 small_base_model=f"Qwen_Qwen2.5-Math-{small_size}B"
 small_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{small_size}B"
-alpha_strategies = ["constant", "cycle100", "random0.5"] 
+
+# large_size="7"
+# large_base_model=f"Qwen_Qwen2.5-Math-{large_size}B"
+
+large_size="32"
+large_base_model=f"Qwen_Qwen2.5-{large_size}B"
+
+large_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{large_size}B"
+alpha_strategies = ["constant", "cycle100", "random0.5", "override_annealing"] 
 models = [small_base_model, small_expert_model, large_base_model, large_expert_model]
 models += [f"dexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+models += [f"bexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 
 def get_data_items(data_file):
     with open(data_file, 'r') as reader:
@@ -60,17 +66,17 @@ def main():
             data_items = get_data_items(data_file)
 
             pattern = f"results/{dataset}/{model}/*/predictions.jsonl"
-            for file_path in glob.glob(pattern):
+            for file_path in glob.glob(pattern)[:8]:
                 with open(file_path, 'r') as reader:
                     pred_items = [json.loads(l) for l in reader]
                 assert len(pred_items) == len(data_items)
                 for pred_item, data_item in zip(pred_items, data_items):
                     data_item["preds"].append(pred_item["prediction"])
-            
-            k = len(data_items[0]["preds"])
-            pass_at_1 = pass_at_k(data_items, k=1)
-            majority_at_k = majority(data_items)
-            print(f"{dataset}\t{model}\tpass@1={pass_at_1*100:.2f}\tmaj@{k}={majority_at_k*100:.2f}")
+            if glob.glob(pattern): 
+                k = len(data_items[0]["preds"])
+                pass_at_1 = pass_at_k(data_items, k=1)
+                majority_at_k = majority(data_items)
+                print(f"{dataset}\t{model}\tpass@1 = {pass_at_1*100:.1f}\tmaj@{k} = {majority_at_k*100:.1f}")
 
 
 

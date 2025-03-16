@@ -6,13 +6,47 @@ from typing import Optional, Dict, Any
 import torch
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 import torch.nn.functional as F
-from transformers.generation.utils import (
-    ModelOutput,
-    top_k_top_p_filtering,
-    StoppingCriteriaList,
-    LogitsProcessorList
-)
+# TODO: remove these references 
+# from transformers.generation.utils import (
+#     ModelOutput,
+#     top_k_top_p_filtering,
+#     StoppingCriteriaList,
+#     LogitsProcessorList
+# )
 from collections import defaultdict
+
+# https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+def top_k_top_p_filtering(_logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
+    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+        Args:
+            logits: logits distribution shape (vocabulary size)
+            top_k >0: keep only top k tokens with highest probability (top-k filtering).
+            top_p >0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+    """
+    # TODO: convert next_token_logits dim to 1 then convert back
+    assert _logits.shape[0] == 1 # assume greedy decoding
+    # assert logits.dim() == 1  # batch size 1 for now - could be updated for more but the code would be less clear
+    logits = _logits.squeeze(0)
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    if top_k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = filter_value
+
+    if top_p > 0.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+        logits[indices_to_remove] = filter_value
+    return logits.unsqueeze(0)
 
 B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
 
@@ -96,7 +130,7 @@ class DExpertsLlama:
         #   "S2_ONE_COUNTDOWN": alpha=1 => system 2 for 100 steps after overriding event  
         self.phase = "S1_ZERO"  
         self.phase_step_count = 0  # how many steps so far in the current phase  
-        self.alpha = 0.0         # actual alpha in effect  
+        self.alpha = 1.0         # actual alpha in effect  
   
         # If provided, we will log JSON lines to this file  
         self.log_file = log_file  
@@ -169,7 +203,8 @@ class DExpertsLlama:
             # alpha=1  
             if overriding_event_occurred:  
                 # start countdown  
-                self.phase = "S2_ONE_COUNTDOWN"  
+                # self.phase = "S2_ONE_COUNTDOWN"  
+                self.phase = "S1_ZERO"  
                 self.phase_step_count = 0  
   
         elif self.phase == "S2_ONE_COUNTDOWN":  
@@ -202,8 +237,8 @@ class DExpertsLlama:
         do_sample: bool = False,
         top_p: float = 1.0,
         temperature: float = 1.0,
-        logits_processor: Optional[LogitsProcessorList] = None,
-        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        logits_processor = None,
+        stopping_criteria = None,
         return_logits_for_analysis: bool = False,
         **kwargs
     ):
@@ -268,6 +303,35 @@ class DExpertsLlama:
         extra_prompt_appended = False   # Flag to ensure extra prompt is added only once.
 
         while gen_steps < allowed_gen_steps:
+            if extra_prompt_appended:
+                self.alpha = 0
+            else:
+                if self.alpha_strategy is None or self.alpha_strategy == "constant":
+                    self.alpha = 1
+                elif self.alpha_strategy.startswith("cycle"):
+                    # cycle100
+                    T = int(self.alpha_strategy.replace("cycle", "")) 
+                    self.alpha = (gen_steps // T) % 2
+                elif self.alpha_strategy.startswith("2cycles"):
+                    # 2cycles-400-100
+                    items = self.alpha_strategy.split('-')
+                    T0 = int(items[1])
+                    T1 = int(items[2])
+                    assert T0 % 100 == 0
+                    assert T1 % 100 == 0
+                    if (gen_steps // 100) % (T0 // 100 + T1 // 100) < (T0 // 100):
+                        self.alpha = 0
+                    else:
+                        self.alpha = 1
+                elif self.alpha_strategy.startswith("random"):
+                    # random0.5
+                    prob = float(self.alpha_strategy.replace("random", ""))
+                    self.alpha = 1 if random.random() < prob else 0
+                elif self.alpha_strategy == "override_annealing":
+                    self._update_phase(overriding_event_occurred, extra_prompt_appended)  
+                else:
+                    raise ValueError(f"invalid alpha_strategy: {self.alpha_strategy}")
+
             # ------------------------------------------------  
             # 1) Prepare base inputs (always needed for forward)  
             # ------------------------------------------------  
@@ -434,7 +498,7 @@ class DExpertsLlama:
                 if extra_input.shape[0] == 1 and input_ids.shape[0] > 1:
                     extra_input = extra_input.expand(input_ids.shape[0], -1)
                 input_ids = torch.cat([input_ids, extra_input], dim=-1)
-                # expert_input_ids = torch.cat([expert_input_ids, extra_input], dim=-1)
+                expert_input_ids = torch.cat([expert_input_ids, extra_input], dim=-1)
 
                 # Also update attention masks if they exist.
                 if "attention_mask" in base_kwargs:
@@ -452,38 +516,6 @@ class DExpertsLlama:
                 allowed_gen_steps += 100
                 extra_prompt_appended = True
 
-            # ------------------------------------------------  
-            # 10) Update the finite state machine  
-            # ------------------------------------------------  
-            # self.alpha = 0 if gen_steps < 100 or extra_prompt_appended else 1
-            if gen_steps < 100 or extra_prompt_appended:
-                self.alpha = 0
-            else:
-                if self.alpha_strategy is None or self.alpha_strategy == "constant":
-                    self.alpha = 1
-                elif self.alpha_strategy.startswith("cycle"):
-                    # cycle100
-                    T = int(self.alpha_strategy.replace("cycle", "")) 
-                    self.alpha = (gen_steps // T) % 2
-                elif self.alpha_strategy.startswith("2cycles"):
-                    # 2cycles-400-100
-                    items = self.alpha_strategy.split('-')
-                    T0 = int(items[1])
-                    T1 = int(items[2])
-                    assert T0 % 100 == 0
-                    assert T1 % 100 == 0
-                    if (gen_steps // 100) % (T0 // 100 + T1 // 100) < (T0 // 100):
-                        self.alpha = 0
-                    else:
-                        self.alpha = 1
-                elif self.alpha_strategy.startswith("random"):
-                    # random0.5
-                    prob = float(self.alpha_strategy.replace("random", ""))
-                    self.alpha = 1 if random.random() < prob else 0
-                elif self.alpha_strategy == "override_annealing":
-                    self._update_phase(overriding_event_occurred, extra_prompt_appended)  
-                else:
-                    raise ValueError(f"invalid alpha_strategy: {self.alpha_strategy}")
   
             # track how many steps in the current phase  
             self.phase_step_count += 1  
@@ -500,11 +532,13 @@ class DExpertsLlama:
 
     def _update_model_kwargs_for_generation(
         self,
-        outputs: ModelOutput,
+        outputs,
         kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
         # update past_key_values
         kwargs["past_key_values"] = outputs.past_key_values
+        # https://github.com/huggingface/transformers/issues/36151
+        kwargs["cache_position"] = torch.tensor([kwargs["attention_mask"].shape[1]]).to(outputs.logits.device)
 
         # update attention mask
         if "attention_mask" in kwargs:

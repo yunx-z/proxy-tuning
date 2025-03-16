@@ -140,7 +140,7 @@ def load_lm_and_tokenizer(
     device_map="auto",
     load_in_8bit=False,
     convert_to_half=False,
-    use_fast_tokenizer=True,
+    use_fast_tokenizer=False,
     padding_side="left",
 ):
 
@@ -184,7 +184,7 @@ def load_dexperts_model_and_tokenizer(
     alpha: float = 1.0,
     chat_response_prefix: str = None,
     load_in_8bit: bool = False,
-    use_fast_tokenizer: bool = True,
+    use_fast_tokenizer: bool = False,
     padding_side: str = "left",
     log_file: str = None,
     alpha_strategy: str = None,
@@ -201,7 +201,7 @@ def load_dexperts_model_and_tokenizer(
     }
 
     print(f"Loading tokenizer from: {base_model_name_or_path}")
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path, use_fast_tokenizer=use_fast_tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path, use_fast_tokenizer=False)
     tokenizer = add_pad_token(tokenizer, padding_side)
 
     model = DExpertsLlama(

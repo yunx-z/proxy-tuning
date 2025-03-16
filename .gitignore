@@ -1,4 +1,5 @@
 __pycache__/
+bak/
 *.sh
 logs/
 results/
@@ -6,3 +7,4 @@ data/
 Qwen/
 deepseek-ai/
 exact_match/
+meta-llama/
