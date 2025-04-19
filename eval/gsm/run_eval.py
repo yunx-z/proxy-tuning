@@ -56,6 +56,7 @@ def main(args):
         fout.write(prompts[0])
 
     if args.model_name_or_path:
+        assert 0, "Deprecated"
         print("Loading model and tokenizer...")
         model, tokenizer = load_lm_and_tokenizer(
             model_name_or_path=args.model_name_or_path,
@@ -77,6 +78,11 @@ def main(args):
         )
     print("Finish loading model and tokenizer!")
 
+    if "Qwen" in args.base_model_name_or_path:
+        stop_id_sequences = [[151643], [151645]]
+    else:
+        stop_id_sequences = None
+
     outputs = generate_completions(
         model=model,
         tokenizer=tokenizer,
@@ -84,6 +90,7 @@ def main(args):
         max_new_tokens=args.max_new_tokens,
         batch_size=args.eval_batch_size,
         do_sample=args.do_sample,
+        stop_id_sequences=stop_id_sequences,
     )
 
 

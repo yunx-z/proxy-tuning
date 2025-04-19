@@ -1,4 +1,6 @@
 __pycache__/
+deepscaler_eval_logs/
+simplescaling/
 bak/
 *.sh
 logs/

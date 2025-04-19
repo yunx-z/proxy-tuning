@@ -1,0 +1,32 @@
+# for dataset in "aime2024" "aime2025" "MATH100"; do
+
+for dataset in "aime2024"; do
+	# if [[ "$dataset" == *"MATH"* ]]; then
+	#     total_runs=1 # greedy
+	# else
+	#     total_runs=8 # sampling
+	# fi
+	total_runs=8 # sampling
+
+	for i in $(seq 1 $total_runs); do
+		# spgpu2
+		bash launch.sh "DExperts" "constant1.0" "$dataset"
+
+		models=("small_expert_model")
+		for model in "${models[@]}"; do
+			bash launch.sh "$model" "" "$dataset"
+		done
+
+		# spgpu
+		# alpha_strategys=("constant0.25" "constant0.5" "constant2.0")
+		# for alpha_strategy in "${alpha_strategys[@]}"; do
+		# 	bash launch.sh "DExperts" "${alpha_strategy}" "$dataset"
+		# done
+
+		# alpha_strategys=("expert_logit_only" "expert_keyword_logits_only")
+		# for alpha_strategy in "${alpha_strategys[@]}"; do
+		# 	bash launch.sh "TwoBody" "${alpha_strategy}" "$dataset"
+		# done
+
+	done
+done
