@@ -91,6 +91,7 @@ def main(args):
         batch_size=args.eval_batch_size,
         do_sample=args.do_sample,
         stop_id_sequences=stop_id_sequences,
+        stop_repetitive_generation=args.alpha_strategy is not None,
     )
 
 

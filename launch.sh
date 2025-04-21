@@ -4,8 +4,10 @@ dataset=$3
 
 if [[ "$model" == *"small"* ]]; then
     gpu_cnt=1
+    batch_sz=16
 else
-    gpu_cnt=4
+    gpu_cnt=2
+    batch_sz=8
 fi
 
 # if [[ "$dataset" == *"MATH"* ]]; then
@@ -15,7 +17,7 @@ fi
 # fi
 
 do_sample="True"
-max_generation_token=16384
+max_generation_token=1024
 
 job_name="${model}--${alpha_strategy}--${dataset}"
 echo """#!/bin/bash
@@ -41,17 +43,17 @@ module load gcc/13.2.0
 source ~/.bashrc
 conda activate proxy-tuning-llama
 
-batch_sz=1
+batch_sz=${batch_sz}
 dataset=\"${dataset}\"
 # Evaluating DExperts with chat expert
 my_data_dir=\"data/eval/\${dataset}/\"
 
 large_size=\"32\"
-small_size=\"14\"
+small_size=\"1.5\"
 large_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${large_size}B\"
 small_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${small_size}B\"
 large_base_model=\"Qwen/Qwen2.5-\${large_size}B-Instruct\"
-small_base_model=\"Qwen/Qwen2.5-\${small_size}B\"
+small_base_model=\"Qwen/Qwen2.5-Math-\${small_size}B\"
 
 # large_size=\"72\"
 # small_size=\"1.5\"

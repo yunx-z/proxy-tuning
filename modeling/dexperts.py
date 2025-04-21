@@ -7,39 +7,8 @@ import torch
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 import torch.nn.functional as F
 from collections import defaultdict
+from modeling.utils import top_k_top_p_filtering
 
-# https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
-def top_k_top_p_filtering(_logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
-    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
-        Args:
-            logits: logits distribution shape (vocabulary size)
-            top_k >0: keep only top k tokens with highest probability (top-k filtering).
-            top_p >0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
-                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
-    """
-    # TODO: convert next_token_logits dim to 1 then convert back
-    assert _logits.shape[0] == 1 # assume greedy decoding
-    # assert logits.dim() == 1  # batch size 1 for now - could be updated for more but the code would be less clear
-    logits = _logits.squeeze(0)
-    top_k = min(top_k, logits.size(-1))  # Safety check
-    if top_k > 0:
-        # Remove all tokens with a probability less than the last token of the top-k
-        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-        logits[indices_to_remove] = filter_value
-
-    if top_p > 0.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-        # Remove tokens with cumulative probability above the threshold
-        sorted_indices_to_remove = cumulative_probs > top_p
-        # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = 0
-
-        indices_to_remove = sorted_indices[sorted_indices_to_remove]
-        logits[indices_to_remove] = filter_value
-    return logits.unsqueeze(0)
 
 B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
 
@@ -454,9 +423,9 @@ class DExpertsLlama:
                 next_tokens = torch.argmax(next_token_logits, dim=-1)  
 
 
-            next_token = self.tokenizer.decode(next_tokens[0])
-            if self.is_thinking_token(next_token):
-                curr_episode += 1
+            # next_token = self.tokenizer.decode(next_tokens[0])
+            # if self.is_thinking_token(next_token):
+            #     curr_episode += 1
   
             # If a sequence is finished, set its next token to pad  
             next_tokens = (  
@@ -468,21 +437,21 @@ class DExpertsLlama:
             # 5) Log the top-10 tokens for base & dexperts  
             #    (only use the first batch element to keep the logs simple)  
             # ------------------------------------------------  
-            base_logits_1d = base_next_token_logits[0].detach()  
-            if dexperts_next_token_logits is not None:  
-                dexperts_logits_1d = dexperts_next_token_logits[0].detach()  
-            else:  
-                dexperts_logits_1d = None  
+            # base_logits_1d = base_next_token_logits[0].detach()  
+            # if dexperts_next_token_logits is not None:  
+            #     dexperts_logits_1d = dexperts_next_token_logits[0].detach()  
+            # else:  
+            #     dexperts_logits_1d = None  
   
-            write_log(  
-                step=gen_steps,  
-                base_logits_1d=base_logits_1d,  
-                dexperts_logits_1d=dexperts_logits_1d,  
-                alpha=self.alpha,  
-                phase=self.phase,  
-                episode=curr_episode,
-                next_token=next_token,
-            )  
+            # write_log(  
+            #     step=gen_steps,  
+            #     base_logits_1d=base_logits_1d,  
+            #     dexperts_logits_1d=dexperts_logits_1d,  
+            #     alpha=self.alpha,  
+            #     phase=self.phase,  
+            #     episode=curr_episode,
+            #     next_token=next_token,
+            # )  
 
             if return_logits_for_analysis:  
                 # gather step stats  
@@ -522,8 +491,9 @@ class DExpertsLlama:
             # ------------------------------------------------  
             # 7) Check stopping criteria  
             # ------------------------------------------------  
-            if stopping_criteria and stopping_criteria(input_ids, None):  
-                break  
+            # this only work for batch_size = 1
+            # if stopping_criteria and stopping_criteria(input_ids, None).all():  
+            #     break  
   
             # if eos_token found, mark the sequence as finished  
             unfinished_sequences = unfinished_sequences.mul(  
@@ -539,16 +509,16 @@ class DExpertsLlama:
             # 8) Check if "overriding event" happened  
             #    (only if alpha=1 => system 2)  
             # ------------------------------------------------  
-            overriding_event_occurred = False  
-            if self.alpha != 0 and (self.expert or self.antiexpert):  
-                # compare base model's argmax vs. dexperts argmax on first example  
-                # TODO: remove false positive overidding (i.e. '=' overridden by ' ='), 
-                # make sure they are very different token distribution, possibly by comparing KL-divergence / intersection of top-10 tokens?
-                # we need to measure accuracy, lenghth, and speed
-                base_top1 = torch.argmax(base_next_token_logits[0], dim=-1)  
-                dexperts_top1 = torch.argmax(dexperts_next_token_logits[0], dim=-1)  
-                if base_top1.item() != dexperts_top1.item():  
-                    overriding_event_occurred = True  
+            # overriding_event_occurred = False  
+            # if self.alpha != 0 and (self.expert or self.antiexpert):  
+            #     # compare base model's argmax vs. dexperts argmax on first example  
+            #     # TODO: remove false positive overidding (i.e. '=' overridden by ' ='), 
+            #     # make sure they are very different token distribution, possibly by comparing KL-divergence / intersection of top-10 tokens?
+            #     # we need to measure accuracy, lenghth, and speed
+            #     base_top1 = torch.argmax(base_next_token_logits[0], dim=-1)  
+            #     dexperts_top1 = torch.argmax(dexperts_next_token_logits[0], dim=-1)  
+            #     if base_top1.item() != dexperts_top1.item():  
+            #         overriding_event_occurred = True  
 
 
 
