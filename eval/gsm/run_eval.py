@@ -30,17 +30,27 @@ def main(args):
     random.seed(42)
 
     print("Loading data...")
-    test_data = []
+    all_test_data = []
     with open(os.path.join(args.data_dir, "test.jsonl")) as fin:
         for line in fin:
             example = json.loads(line)
-            test_data.append({
+            all_test_data.append({
                 "question": example["question"],
                 "answer": str(example["answer"])
             })
 
-    if args.max_examples and len(test_data) > args.max_examples:
-        test_data = test_data[:args.max_examples]
+    test_data = all_test_data
+    if args.max_examples and len(all_test_data) > args.max_examples:
+        test_data = all_test_data[:args.max_examples]
+
+    output_file = os.path.join(args.save_dir, "predictions.jsonl")
+    if os.path.exists(output_file):
+        with open(output_file, 'r') as reader:
+            curr_samples = len([l for l in reader])
+        test_data = all_test_data[curr_samples:]
+        print(f"skipping {curr_samples} examples")
+
+
 
     ensure_dir(args.save_dir)
 
@@ -52,8 +62,9 @@ def main(args):
         prompt = prompt_prefix + "Question: " + example["question"].strip()
         prompts.append(prompt)
 
-    with open(os.path.join(args.save_dir, "example_prompt.txt"), 'w') as fout:
-        fout.write(prompts[0])
+    if len(prompts) > 0:
+        with open(os.path.join(args.save_dir, "example_prompt.txt"), 'w') as fout:
+            fout.write(prompts[0])
 
     if args.model_name_or_path:
         assert 0, "Deprecated"
@@ -92,27 +103,19 @@ def main(args):
         do_sample=args.do_sample,
         stop_id_sequences=stop_id_sequences,
         stop_repetitive_generation=args.alpha_strategy is not None,
+        output_file=output_file,
+        test_data=test_data,
     )
 
-
-    predictions = [my_answer_extraction(output) for output in outputs]
-    targets = [example["answer"] for example in test_data]
-    assert len(predictions) == len(targets)
+    with open(output_file, 'r') as reader:
+        predictions = [my_answer_extraction(json.loads(line)["model_output"]) for line in reader]
+    # predictions = [my_answer_extraction(output) for output in outputs]
+    targets = [example["answer"] for example in all_test_data]
+    assert len(predictions) == len(targets), f"len(predictions) = {len(predictions)}, len(targets) = {len(targets)}"
 
     em_score = sum([int(is_equiv(pred, answer)) for pred, answer in zip(predictions, targets)]) / len(targets)
 
     print(f"Exact match : {em_score}")
-
-    predictions = [{
-        "question": example["question"],
-        "answer": example["answer"],
-        "model_output": output,
-        "prediction": pred
-    } for example, output, pred in zip(test_data, outputs, predictions)]
-
-    with open(os.path.join(args.save_dir, "predictions.jsonl"), "w") as fout:
-        for prediction in predictions:
-            fout.write(json.dumps(prediction) + "\n")
 
     with open(os.path.join(args.save_dir, "metrics.json"), "w") as fout:
         json.dump({

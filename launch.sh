@@ -6,33 +6,34 @@ if [[ "$model" == *"small"* ]]; then
     gpu_cnt=1
     batch_sz=16
 else
-    gpu_cnt=2
+    gpu_cnt=4
     batch_sz=8
 fi
 
-# if [[ "$dataset" == *"MATH"* ]]; then
+# if [[ "$dataset" == "MATH_hard_test" ]]; then
 #     do_sample="False"
 # else
 #     do_sample="True"
 # fi
-
 do_sample="True"
-max_generation_token=1024
+
+max_generation_token=16384
 
 job_name="${model}--${alpha_strategy}--${dataset}"
 echo """#!/bin/bash
 
-#SBATCH --account=wangluxy_owned1
+#SBATCH --account=wangluxy1
 #SBATCH --job-name=${job_name}       # Name of the job
 #SBATCH --output=logs/gl/${job_name}--%j.log   # File to which the output will be written
 #SBATCH --error=logs/gl/${job_name}--%j.log     # File to which the error will be written
 #SBATCH --time=07-00:00:00           # Wall time limit of the job (e.g., 1 hour)
-#SBATCH --partition=spgpu2           # Partition (or queue) name
+#SBATCH --partition=spgpu           # Partition (or queue) name
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:${gpu_cnt}              # Request 1 GPU
 #SBATCH --ntasks=1                # Number of tasks, typically set to 1 for single GPU jobs
 #SBATCH --cpus-per-gpu=4         # Number of CPU cores per task
 #SBATCH --mem=43GB                 # Amount of memory per node (e.g., 16 GB)
+##SBATCH --dependency=afterany:24617369:24617368
 
 echo \"My job ID is \$SLURM_JOB_ID\"
 echo \"Running on host \$(hostname)\"
@@ -49,10 +50,10 @@ dataset=\"${dataset}\"
 my_data_dir=\"data/eval/\${dataset}/\"
 
 large_size=\"32\"
-small_size=\"1.5\"
+small_size=\"7\"
 large_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${large_size}B\"
 small_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${small_size}B\"
-large_base_model=\"Qwen/Qwen2.5-\${large_size}B-Instruct\"
+large_base_model=\"Qwen/Qwen2.5-\${large_size}B\"
 small_base_model=\"Qwen/Qwen2.5-Math-\${small_size}B\"
 
 # large_size=\"72\"
@@ -69,7 +70,12 @@ small_base_model=\"Qwen/Qwen2.5-Math-\${small_size}B\"
 # large_base_model=\"meta-llama/Llama-3.3-\${large_size}B-Instruct\"
 # small_base_model=\"meta-llama/Llama-3.1-\${small_size}B\"
 
-experiment_id=\$(uuidgen)
+
+if [[ "$dataset" == *"train"* ]]; then
+	experiment_id=0
+else
+	experiment_id=\$(uuidgen)
+fi
 
 if [[ \"${model}\" == \"DExperts\" ]]; then
 	results_dir=\"results/\${dataset}/dexperts-S\${small_size}B-L\${large_size}B/${alpha_strategy}/\${experiment_id}\"

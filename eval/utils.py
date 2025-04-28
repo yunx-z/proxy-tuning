@@ -1,6 +1,7 @@
 import torch
 import tqdm
 import os
+import json
 from importlib import import_module
 from transformers import (
     StoppingCriteria,
@@ -9,6 +10,7 @@ from transformers import (
     NoBadWordsLogitsProcessor,
     SuppressTokensAtBeginLogitsProcessor
 )
+from eval.math_util import my_answer_extraction
 
 
 def ensure_dir(d):
@@ -46,6 +48,8 @@ def generate_completions(
     disable_tqdm=False,
     temperature=0.6,
     top_p=0.95,
+    output_file=None,
+    test_data=None,
     **generation_kwargs
 ):
     generations = []
@@ -55,6 +59,7 @@ def generate_completions(
     num_return_sequences = generation_kwargs.get("num_return_sequences", 1)
     for i in range(0, len(prompts), batch_size):
         batch_prompts = prompts[i:i+batch_size]
+        batch_test_data = test_data[i:i+batch_size]
         tokenized_prompts = tokenizer(
             batch_prompts, padding="longest", return_tensors="pt", add_special_tokens=add_special_tokens
         )
@@ -129,6 +134,21 @@ def generate_completions(
 
         if not disable_tqdm:
             progress.update(len(batch_prompts)//num_return_sequences)
+
+        if output_file:
+            predictions = [my_answer_extraction(output) for output in batch_generations]
+
+            predictions = [{
+                "question": example["question"],
+                "answer": example["answer"],
+                "model_output": output,
+                "prediction": pred
+            } for example, output, pred in zip(batch_test_data, batch_generations, predictions)]
+
+            with open(output_file, "a") as fout:
+                for prediction in predictions:
+                    fout.write(json.dumps(prediction) + "\n")
+
 
     assert len(generations) == len(prompts) * num_return_sequences, "number of generations should be equal to number of prompts * num_return_sequences"
     return generations

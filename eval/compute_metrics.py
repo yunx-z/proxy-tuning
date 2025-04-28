@@ -12,12 +12,12 @@ models = []
 alpha_strategies = ["constant", "constant1.0", "constant0.5", "constant0.25", "constant2.0", "expert_logit_only", "expert_keyword_logits_only"] 
 
 small_size="1.5"
-small_base_model=f"Qwen_Qwen2.5-{small_size}B"
+small_base_model=f"Qwen_Qwen2.5-Math-{small_size}B"
 small_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{small_size}B"
 # large_size="7"
 # large_base_model=f"Qwen_Qwen2.5-Math-{large_size}B"
 large_size="32"
-large_base_model=f"Qwen_Qwen2.5-{large_size}B-Instruct"
+large_base_model=f"Qwen_Qwen2.5-{large_size}B"
 large_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{large_size}B"
 models += [small_expert_model, large_base_model, large_expert_model]
 models += [f"dexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
@@ -100,7 +100,7 @@ def majority(data_items):
     return sum(maj_correct_scores) / len(maj_correct_scores)
 
 def main():
-    for dataset in ["aime2024", "aime2025", "MATH100"]:
+    for dataset in ["aime2024", "aime2025", "MATH_hard_test"]:
         data_file = f"data/eval/{dataset}/test.jsonl"
 
         for model in models:

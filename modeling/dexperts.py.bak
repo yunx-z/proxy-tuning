@@ -1,0 +1,648 @@
+import sys
+import time
+import random
+import os
+import json
+from typing import Optional, Dict, Any
+import torch
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer
+import torch.nn.functional as F
+from collections import defaultdict
+from modeling.utils import top_k_top_p_filtering
+
+
+B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
+
+def _get_topk_info(logits: torch.Tensor, tokenizer: PreTrainedTokenizer, k: int = 10):  
+    """  
+    Returns the top-k tokens and logits (as Python lists) for inspection.  
+    Assumes logits is 1D, i.e. shape [vocab_size].  
+    """  
+    top_values, top_indices = torch.topk(logits, k)  
+    top_values = top_values.tolist()  
+    top_tokens = [tokenizer.decode([idx]) for idx in top_indices]  
+    return top_tokens, top_values  
+
+class DExpertsLlama:
+    def __init__(
+        self,
+        base_model_name_or_path: str,
+        expert_model_name_or_path: str,
+        antiexpert_model_name_or_path: str,
+        tokenizer: PreTrainedTokenizer,
+        system_prompt: str = None,
+        alpha: float = 1.0,
+        chat_response_prefix: str = None,
+        model_kwargs: Dict[str, Any] = None,
+        log_file: Optional[str] = None,
+        alpha_strategy: str = None,
+    ):
+        """
+        chat_response_prefix: For llama chat models, it can be helpful for the response
+        to start with a certain prefix to constrain the generation to directly answer
+        the question. This makes evaluation on MC datasets easier.
+        """
+        
+        self.base_model_name_or_path = base_model_name_or_path
+        self.expert_model_name_or_path = expert_model_name_or_path
+        self.antiexpert_model_name_or_path = antiexpert_model_name_or_path
+        self.model_kwargs = model_kwargs
+
+        self.base = self.load_model(self.base_model_name_or_path, self.model_kwargs)
+        self.expert = None
+        self.antiexpert = None
+
+        self.tokenizer = tokenizer
+        # Although the original 'alpha' constructor argument is retained, we  
+        # will not use it verbatim for generation. Instead, alpha is controlled  
+        # by the finite state machine described below.
+        # self.alpha = alpha
+        self.device = self.base.device
+        self.chat_response_prefix = chat_response_prefix
+
+        # Llama chat experts need different formatting
+        self.use_chat_format_for_expert = True if expert_model_name_or_path and 'chat' in expert_model_name_or_path.lower() else False
+
+        if self.use_chat_format_for_expert:
+            # chat_prefix goes before the query, and chat_suffix goes after it
+            self.chat_prefix = "[INST]"
+            self.chat_suffix = "[/INST]"
+
+            if system_prompt:
+                self.chat_prefix += f"{B_SYS}{system_prompt}{E_SYS}"
+
+            if self.chat_response_prefix:
+                self.chat_suffix += f" {chat_response_prefix}"
+
+        # State machine variables  
+        # The phases:  
+        #   "S1_ZERO": alpha=0 => system 1 for 100 steps from the start or after counting down 
+        #   "S2_ONE": alpha=1 => system 2 (wait for overriding event)  
+        #   "S2_ONE_COUNTDOWN": alpha=1 => system 2 for 100 steps after overriding event  
+        self.phase = "S1_ZERO"  
+        self.phase_step_count = 0  # how many steps so far in the current phase  
+        self.alpha = 1.0         # actual alpha in effect  
+  
+        # If provided, we will log JSON lines to this file  
+        self.log_file = log_file  
+        if os.path.exists(self.log_file):
+            os.remove(self.log_file)
+
+        self.alpha_strategy = alpha_strategy
+        self.MAX_EPISODE = 3
+
+    def load_model(self, model_name_or_path, _model_kwargs):
+        if model_name_or_path:
+            a_model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path, **_model_kwargs
+            )
+            return a_model.eval()
+        else:
+            return None 
+
+    def forward(
+        self,
+        base_inputs,
+        expert_inputs,
+        antiexpert_inputs,
+        return_dict=None
+    ):
+        base_outputs = self.base(**base_inputs, return_dict=return_dict)
+        expert_outputs = self.expert(**expert_inputs, return_dict=return_dict)
+        antiexpert_outputs = self.antiexpert(**antiexpert_inputs, return_dict=return_dict)
+
+        return base_outputs, expert_outputs, antiexpert_outputs
+
+    def _get_tokenized_chat_inputs(self, input_ids):
+        """Decode input_ids and encode again to insert chat formatting"""
+
+        prompts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+
+        # remove response_prefix (e.g., "Answer:") from the prompt if it's already there
+        if self.chat_response_prefix:
+            cleaned_prompts = []
+            for p in prompts:
+                if self.chat_response_prefix in p:
+                    p = p.replace(self.chat_response_prefix, '').rstrip()
+                cleaned_prompts.append(p)
+        else:
+            cleaned_prompts = prompts
+
+        chat_prompts = [f'{self.chat_prefix} {p} {self.chat_suffix}' for p in cleaned_prompts]
+        # print('DExperts expert prompt', flush=True)
+        # print(chat_prompts[0], flush=True)
+        chat_inputs = self.tokenizer(
+            chat_prompts, padding="longest", return_tensors="pt",
+            add_special_tokens=True
+        )
+        chat_inputs.input_ids = chat_inputs.input_ids.to(self.device)
+        chat_inputs.attention_mask = chat_inputs.attention_mask.to(self.device)
+
+        return chat_inputs
+
+    def _update_phase(self, overriding_event_occurred: bool, extra_prompt_appended: bool):  
+        """  
+        State machine update logic:  
+          - S1_ZERO: alpha=0 => system 1 for 100 steps; then go to S2_ONE  
+          - S2_ONE: alpha=1 => system 2, wait for overriding event -> move to S2_ONE_COUNTDOWN  
+          - S2_ONE_COUNTDOWN: alpha=1 => system 2 for 100 steps -> move to S1_ZERO  
+          - S1_FINAL: alpha=0 => system 1 for 100 steps for answer generation -> end
+        """  
+        if extra_prompt_appended:
+            self.phase = "S1_FINAL"
+            self.phase_step_count = 0
+
+        elif self.phase == "S1_ZERO":  
+            # alpha=0  
+            if self.phase_step_count >= 100:  
+                self.phase = "S2_ONE"  
+                self.phase_step_count = 0  
+  
+        elif self.phase == "S2_ONE":  
+            # alpha=1  
+            if overriding_event_occurred:  
+                # start countdown  
+                # self.phase = "S2_ONE_COUNTDOWN"  
+                self.phase = "S1_ZERO"  
+                self.phase_step_count = 0  
+  
+        elif self.phase == "S2_ONE_COUNTDOWN":  
+            # alpha=1  
+            if self.phase_step_count >= 100:  
+                # after 100 steps, go to S1_ZERO  
+                self.phase = "S1_ZERO"  
+                self.phase_step_count = 0  
+  
+        # Now set alpha/mode based on current phase  
+        if self.phase in ["S1_FINAL", "S1_ZERO"]:  
+            self.alpha = 0  
+        else:  
+            self.alpha = 1  
+
+    def update_analysis_data(self, analysis_data, next_tokens, next_token_logits_dict):
+        analysis_data['tokens'].append([self.tokenizer.decode(t) for t in next_tokens])
+        analysis_data['token_ids'].append(next_tokens)
+
+        # logits from each model for the next token
+        for model in next_token_logits_dict.keys():
+            analysis_data[f'logits_{model}'].append(next_token_logits_dict[model].unsqueeze(dim=1))
+
+        return analysis_data
+
+    def generate(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        max_new_tokens: Optional[int] = 100,
+        do_sample: bool = False,
+        top_p: float = 1.0,
+        temperature: float = 1.0,
+        logits_processor = None,
+        stopping_criteria = None,
+        return_logits_for_analysis: bool = False,
+        **kwargs
+    ):
+        """  
+        Modified generate method to:  
+          - dynamically toggle alpha between 0 and 1 based on a finite-state machine  
+          - log JSON lines of top-10 tokens/logits each step to self.log_file  
+        """  
+        base_kwargs = kwargs.copy()
+        expert_kwargs = kwargs.copy()
+        antiexpert_kwargs = kwargs.copy()
+
+        # prepare inputs for expert model
+        if self.use_chat_format_for_expert:
+            chat_inputs = self._get_tokenized_chat_inputs(input_ids)
+            expert_input_ids = chat_inputs.input_ids.to(input_ids.device)
+            expert_kwargs['attention_mask'] = chat_inputs.attention_mask
+        else:
+            expert_input_ids = input_ids.to(input_ids.device)
+
+        # keep track of which sequences are already finished
+        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
+        eos_token_id_tensor = torch.tensor([self.tokenizer.eos_token_id]).to(input_ids.device)
+
+        if return_logits_for_analysis:
+            analysis_data = defaultdict(list)
+
+        # local helper to write JSON lines  
+        def write_log(step: int, base_logits_1d: torch.Tensor,  
+                dexperts_logits_1d: Optional[torch.Tensor], alpha: float, phase: str, episode: int, next_token: str):  
+            """  
+            Logs one dictionary entry to self.log_file (if not None).  
+            base_logits_1d: shape [vocab_size]  
+            dexperts_logits_1d: shape [vocab_size] or None  
+            """  
+            if base_logits_1d is None:  
+                return  
+            # top-10 from base model  
+            base_top10_tokens, base_top10_vals = _get_topk_info(base_logits_1d, self.tokenizer, k=10)  
+            if dexperts_logits_1d is not None:  
+                dexperts_top10_tokens, dexperts_top10_vals = _get_topk_info(dexperts_logits_1d, self.tokenizer, k=10)  
+            else:  
+                dexperts_top10_tokens, dexperts_top10_vals = None, None  
+  
+            log_obj = {  
+                "step": step,  
+                "phase": phase,  
+                "episode": episode,
+                "alpha": alpha,  
+                "next_token": next_token, 
+                "base_top10_tokens": base_top10_tokens,  
+                "dexperts_top10_tokens": dexperts_top10_tokens,  
+                "base_top10_logits": base_top10_vals,  
+                "dexperts_top10_logits": dexperts_top10_vals,  
+            }  
+            if self.log_file is not None:  
+                with open(self.log_file, "a", encoding="utf-8") as f:  
+                    f.write(json.dumps(log_obj) + "\n")  
+
+
+        # We'll use a while loop that runs until we've generated the allowed number of tokens.
+        gen_steps = 0                   # Count of tokens generated by the model.
+        allowed_gen_steps = max_new_tokens  # Initially allow max_new_tokens.
+        extra_prompt_appended = False   # Flag to ensure extra prompt is added only once.
+        curr_episode = 0
+        self.alpha = 1 # reset to 1 before start! 
+        # reload model if deleted
+        if self.expert is None:
+            self.expert = self.load_model(self.expert_model_name_or_path, self.model_kwargs)
+        if self.antiexpert is None:
+            self.antiexpert = self.load_model(self.antiexpert_model_name_or_path, self.model_kwargs)
+
+
+        while gen_steps < allowed_gen_steps:
+            step_begin_time = time.perf_counter()
+            if extra_prompt_appended:
+                self.alpha = 0
+            else:
+                if self.alpha_strategy is None or self.alpha_strategy.startswith("constant"):
+                    if self.alpha_strategy == "constant" or self.alpha_strategy is None:
+                        self.alpha = 1
+                    else:
+                        self.alpha = float(self.alpha_strategy.replace("constant", ""))
+                elif self.alpha_strategy.startswith("cycle"):
+                    # cycle100
+                    T = int(self.alpha_strategy.replace("cycle", "")) 
+                    self.alpha = (gen_steps // T) % 2
+                elif self.alpha_strategy.startswith("2cycles"):
+                    # 2cycles-400-100
+                    items = self.alpha_strategy.split('-')
+                    T0 = int(items[1])
+                    T1 = int(items[2])
+                    assert T0 % 100 == 0
+                    assert T1 % 100 == 0
+                    if (gen_steps // 100) % (T0 // 100 + T1 // 100) < (T0 // 100):
+                        self.alpha = 0
+                    else:
+                        self.alpha = 1
+                elif self.alpha_strategy.startswith("random"):
+                    # random0.5
+                    prob = float(self.alpha_strategy.replace("random", ""))
+                    self.alpha = 1 if random.random() < prob else 0
+                elif self.alpha_strategy == "override_annealing":
+                    self._update_phase(overriding_event_occurred, extra_prompt_appended)  
+                elif self.alpha_strategy == "ppt":
+                    if curr_episode > self.MAX_EPISODE:
+                        self.alpha = 0
+                        # remove expert and antiexpert from GPU since we don't need their logits anymore
+                        if self.expert and self.antiexpert:
+                            del self.expert
+                            self.expert = None
+                            del self.antiexpert
+                            self.antiexpert = None
+                            torch.cuda.empty_cache()
+                elif self.alpha_strategy in ["expert_logit_only", "expert_keyword_logits_only"]:
+                    self.alpha = 1
+                else:
+                    raise ValueError(f"invalid alpha_strategy: {self.alpha_strategy}")
+
+            # ------------------------------------------------  
+            # 1) Prepare base inputs (always needed for forward)  
+            # ------------------------------------------------  
+            base_start_time = time.perf_counter()
+            print(f"Step {gen_steps}: Checking devices before expert prepare_inputs...", flush=True)
+            print(f"  base_input_ids device: {input_ids.device}", flush=True)
+            if 'attention_mask' in base_kwargs and base_kwargs['attention_mask'] is not None:
+                print(f"  base_kwargs['attention_mask'] device: {base_kwargs['attention_mask'].device}", flush=True)
+            if 'past_key_values' in base_kwargs and base_kwargs['past_key_values'] is not None:
+                # KV cache is usually a tuple of tuples of tensors ((k,v), (k,v), ...)
+                first_key_device = base_kwargs['past_key_values'][0][0].device
+                print(f"  base_kwargs['past_key_values'] first key device: {first_key_device}", flush=True)
+            print(f"  Expected base device: {self.base.device}", flush=True)
+
+            base_inputs = self.base.prepare_inputs_for_generation(input_ids, **base_kwargs)  
+
+            # ------------------------------------------------  
+            # 2) Compute base logits  
+            # ------------------------------------------------  
+            base_outputs = self.base(**base_inputs, return_dict=True)  
+            base_next_token_logits = base_outputs.logits[..., -1, :]  
+            base_end_time = time.perf_counter()
+            print(f"base forward time: {base_end_time - base_start_time} s")
+  
+            # prepare inputs for experts  
+            # note: for anti-expert we use input_ids (not chat formatting)  
+            if self.expert:
+                expert_start_time = time.perf_counter()
+                print(f"  expert_input_ids device: {expert_input_ids.device}", flush=True)
+                if 'attention_mask' in expert_kwargs and expert_kwargs['attention_mask'] is not None:
+                    print(f"  expert_kwargs['attention_mask'] device: {expert_kwargs['attention_mask'].device}", flush=True)
+                if 'past_key_values' in expert_kwargs and expert_kwargs['past_key_values'] is not None:
+                    # KV cache is usually a tuple of tuples of tensors ((k,v), (k,v), ...)
+                    first_key_device = expert_kwargs['past_key_values'][0][0].device
+                    print(f"  expert_kwargs['past_key_values'] first key device: {first_key_device}", flush=True)
+                print(f"  Expected expert device: {self.expert.device}", flush=True)
+                expert_inputs = self.expert.prepare_inputs_for_generation(expert_input_ids, **expert_kwargs)  
+                # It won't save computation by skipping expert generation when alpha is zero,
+                # because once alpha is changed to 1, we still need to compute key-value for all previously skipped tokens
+
+                # forward pass for experts  
+                expert_outputs = self.expert(**expert_inputs, return_dict=True)  
+                expert_next_token_logits = expert_outputs.logits[..., -1, :]  
+                expert_end_time = time.perf_counter()
+                print(f"expert forward time: {expert_end_time - expert_start_time} s")
+
+
+            if self.antiexpert:
+                antiexpert_start_time = time.perf_counter()
+                print(f"  antiexpert_input_ids device: {input_ids.device}", flush=True)
+                if 'attention_mask' in antiexpert_kwargs and antiexpert_kwargs['attention_mask'] is not None:
+                    print(f"  antiexpert_kwargs['attention_mask'] device: {antiexpert_kwargs['attention_mask'].device}", flush=True)
+                if 'past_key_values' in antiexpert_kwargs and antiexpert_kwargs['past_key_values'] is not None:
+                    # KV cache is usually a tuple of tuples of tensors ((k,v), (k,v), ...)
+                    first_key_device = antiexpert_kwargs['past_key_values'][0][0].device
+                    print(f"  antiexpert_kwargs['past_key_values'] first key device: {first_key_device}", flush=True)
+                print(f"  Expected antiexpert device: {self.antiexpert.device}", flush=True)
+
+                antiexpert_inputs = self.antiexpert.prepare_inputs_for_generation(input_ids, **antiexpert_kwargs)  
+                # It won't save computation by skipping expert generation when alpha is zero,
+                # because once alpha is changed to 1, we still need to compute key-value for all previously skipped tokens
+
+                # forward pass for experts  
+                antiexpert_outputs = self.antiexpert(**antiexpert_inputs, return_dict=True)  
+                antiexpert_next_token_logits = antiexpert_outputs.logits[..., -1, :]  
+                antiexpert_end_time = time.perf_counter()
+                print(f"antiexpert forward time: {antiexpert_end_time - antiexpert_start_time} s")
+
+
+            # else:  
+            # alpha=0 => no difference  
+  
+            # ------------------------------------------------  
+            # 3) Determine final next_token_logits for sampling  
+            # ------------------------------------------------  
+            logits_fusion_start = time.perf_counter()
+            if self.alpha != 0 and self.expert and self.antiexpert:  
+                vocab_size = self.tokenizer.vocab_size + 3 # include eos, user, assistant special token
+                # Copy the base logits so that tokens beyond vocab_size remain unchanged.
+                dexperts_next_token_logits = base_next_token_logits.clone()
+
+                # Only update the first vocab_size logits.
+                dexperts_next_token_logits[:, :vocab_size] = (
+                    base_next_token_logits[:, :vocab_size] +
+                    self.alpha * (expert_next_token_logits[:, :vocab_size] - antiexpert_next_token_logits[:, :vocab_size])
+                )
+
+                next_token_logits = dexperts_next_token_logits 
+            elif self.alpha != 0 and self.expert and self.antiexpert is None:
+                vocab_size = self.tokenizer.vocab_size + 3 # include eos, user, assistant special token
+                # Copy the base logits so that tokens beyond vocab_size remain unchanged.
+                dexperts_next_token_logits = base_next_token_logits.clone()
+
+                if self.alpha_strategy == "expert_logit_only":
+                    # Only update the first vocab_size logits.
+                    dexperts_next_token_logits[:, :vocab_size] = (
+                        base_next_token_logits[:, :vocab_size] +
+                        self.alpha * expert_next_token_logits[:, :vocab_size]
+                    )
+                elif self.alpha_strategy == "expert_keyword_logits_only":
+                    # Define the list of keywords that are allowed.
+                    special_tokens = ["Wait", "Alternatively", "Hmm"]
+                    # Convert these tokens to their corresponding IDs.
+                    special_token_ids = [self.tokenizer.convert_tokens_to_ids(token) for token in special_tokens]
+
+                    # Create a mask for the first vocab_size dimensions.
+                    # This mask has a 1 at positions corresponding to the special tokens,
+                    # and 0 elsewhere.
+                    mask = torch.zeros(vocab_size, device=expert_next_token_logits.device)
+                    for token_id in special_token_ids:
+                        if token_id < vocab_size:  # Ensure that the token_id is within range.
+                            mask[token_id] = 1
+
+                    # Broadcast the mask to the batch dimension and apply it.
+                    # This will zero out all expert logits for tokens not in the special tokens list.
+                    filtered_expert_logits = expert_next_token_logits[:, :vocab_size] * mask
+
+                    dexperts_next_token_logits[:, :vocab_size] = (
+                        base_next_token_logits[:, :vocab_size] +
+                        self.alpha * filtered_expert_logits
+                    )
+
+                next_token_logits = dexperts_next_token_logits 
+            else:  
+                dexperts_next_token_logits = None  
+                next_token_logits = base_next_token_logits  # alpha=0 => use base only  
+  
+            # pre-process logits if needed  
+            if logits_processor:  
+                next_token_logits = logits_processor(input_ids, next_token_logits)  
+
+            logits_fusion_end = time.perf_counter()
+            print(f"logits fusion time: {logits_fusion_end - logits_fusion_start} s")
+  
+            logits_filtering_start = time.perf_counter()
+            # apply temperature / top-p  
+            if temperature != 1.0:  
+                next_token_logits = next_token_logits / temperature  
+            if top_p < 1.0:  
+                next_token_logits = top_k_top_p_filtering(next_token_logits, top_p=top_p)  
+  
+            # ------------------------------------------------  
+            # 4) Sample or Greedy  
+            # ------------------------------------------------  
+            if do_sample:  
+                probs = F.softmax(next_token_logits, dim=-1)  
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)  
+            else:  
+                next_tokens = torch.argmax(next_token_logits, dim=-1)  
+
+            # next_token = self.tokenizer.decode(next_tokens[0])
+            # if self.is_thinking_token(next_token):
+            #     curr_episode += 1
+  
+            # If a sequence is finished, set its next token to pad  
+            next_tokens = (  
+                next_tokens * unfinished_sequences  
+                + self.tokenizer.pad_token_id * (1 - unfinished_sequences)  
+            )  
+            logits_filtering_end = time.perf_counter()
+            print(f"logits filtering time: {logits_filtering_end - logits_filtering_start} s")
+
+ 
+            # ------------------------------------------------  
+            # 5) Log the top-10 tokens for base & dexperts  
+            #    (only use the first batch element to keep the logs simple)  
+            # ------------------------------------------------  
+            # base_logits_1d = base_next_token_logits[0].detach()  
+            # if dexperts_next_token_logits is not None:  
+            #     dexperts_logits_1d = dexperts_next_token_logits[0].detach()  
+            # else:  
+            #     dexperts_logits_1d = None  
+  
+            # write_log(  
+            #     step=gen_steps,  
+            #     base_logits_1d=base_logits_1d,  
+            #     dexperts_logits_1d=dexperts_logits_1d,  
+            #     alpha=self.alpha,  
+            #     phase=self.phase,  
+            #     episode=curr_episode,
+            #     next_token=next_token,
+            # )  
+
+            if return_logits_for_analysis:  
+                # gather step stats  
+                next_token_logits_dict = {  
+                    "dexperts": next_token_logits,  
+                    "base": base_next_token_logits,  
+                }  
+                if self.expert and self.antiexpert:
+                    next_token_logits_dict["expert"] = expert_next_token_logits  
+                    next_token_logits_dict["antiexpert"] = antiexpert_next_token_logits  
+  
+                # store them  
+                analysis_data["tokens"].append([self.tokenizer.decode(t) for t in next_tokens])  
+                analysis_data["token_ids"].append(next_tokens)  
+                for m_name, val in next_token_logits_dict.items():  
+                    analysis_data[f"logits_{m_name}"].append(val.unsqueeze(dim=1))  
+
+            # ------------------------------------------------  
+            # 6) Update input_ids for next step  
+            # ------------------------------------------------  
+            update_cache_start = time.perf_counter()
+            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)  
+            # also extend expert_input_ids  
+            if self.use_chat_format_for_expert:  
+                expert_input_ids = torch.cat([expert_input_ids, next_tokens[:, None]], dim=-1)  
+            else:  
+                expert_input_ids = input_ids  # keep them aligned if no chat formatting  
+  
+            # update model kwargs to include past / attention_mask  
+            base_kwargs = self._update_model_kwargs_for_generation(base_outputs, base_kwargs)  
+            if self.expert:
+                expert_kwargs = self._update_model_kwargs_for_generation(expert_outputs, expert_kwargs)  
+            if self.antiexpert:
+                antiexpert_kwargs = self._update_model_kwargs_for_generation(  
+                    antiexpert_outputs, antiexpert_kwargs  
+                )  
+
+            # ------------------------------------------------  
+            # 7) Check stopping criteria  
+            # ------------------------------------------------  
+            # this only work for batch_size = 1
+            # if stopping_criteria and stopping_criteria(input_ids, None).all():  
+            #     break  
+  
+            # if eos_token found, mark the sequence as finished  
+            unfinished_sequences = unfinished_sequences.mul(  
+                next_tokens.tile(eos_token_id_tensor.shape[0], 1)  
+                .ne(eos_token_id_tensor.unsqueeze(1))  
+                .prod(dim=0)  
+            )  
+            if unfinished_sequences.max() == 0:  
+                # all sequences finished  
+                break  
+
+            update_cache_end = time.perf_counter()
+            print(f"update_cache time: {update_cache_end - update_cache_start} s")
+
+            # ------------------------------------------------  
+            # 8) Check if "overriding event" happened  
+            #    (only if alpha=1 => system 2)  
+            # ------------------------------------------------  
+            # overriding_event_occurred = False  
+            # if self.alpha != 0 and (self.expert or self.antiexpert):  
+            #     # compare base model's argmax vs. dexperts argmax on first example  
+            #     # TODO: remove false positive overidding (i.e. '=' overridden by ' ='), 
+            #     # make sure they are very different token distribution, possibly by comparing KL-divergence / intersection of top-10 tokens?
+            #     # we need to measure accuracy, lenghth, and speed
+            #     base_top1 = torch.argmax(base_next_token_logits[0], dim=-1)  
+            #     dexperts_top1 = torch.argmax(dexperts_next_token_logits[0], dim=-1)  
+            #     if base_top1.item() != dexperts_top1.item():  
+            #         overriding_event_occurred = True  
+
+
+
+            # ------------------------------------------------  
+            # 9) force answer generation when max_generaiton_token limit is hit
+            # ------------------------------------------------  
+            gen_steps += 1
+ 
+            # If we've generated exactly max_new_tokens and haven't added the extra prompt, append it.
+            if gen_steps == max_new_tokens and not extra_prompt_appended:
+                extra_prompt = "\nI'm not allowed to think more so I have to conclude that the final answer is:"
+                extra_input = self.tokenizer(extra_prompt, return_tensors="pt").input_ids.to(input_ids.device)
+                # Ensure the extra prompt is broadcasted to all sequences if needed.
+                if extra_input.shape[0] == 1 and input_ids.shape[0] > 1:
+                    extra_input = extra_input.expand(input_ids.shape[0], -1)
+                input_ids = torch.cat([input_ids, extra_input], dim=-1)
+                expert_input_ids = torch.cat([expert_input_ids, extra_input], dim=-1)
+
+                # Also update attention masks if they exist.
+                if "attention_mask" in base_kwargs:
+                    extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=base_kwargs["attention_mask"].dtype)
+                    base_kwargs["attention_mask"] = torch.cat([base_kwargs["attention_mask"], extra_attention], dim=-1)
+                if self.expert:
+                    if "attention_mask" in expert_kwargs:
+                        extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=expert_kwargs["attention_mask"].dtype)
+                        expert_kwargs["attention_mask"] = torch.cat([expert_kwargs["attention_mask"], extra_attention], dim=-1)
+                if self.antiexpert:
+                    if "attention_mask" in antiexpert_kwargs:
+                        extra_attention = torch.ones(extra_input.shape, device=input_ids.device, dtype=antiexpert_kwargs["attention_mask"].dtype)
+                        antiexpert_kwargs["attention_mask"] = torch.cat([antiexpert_kwargs["attention_mask"], extra_attention], dim=-1)
+
+
+                # Increase the allowed generation steps by 100.
+                allowed_gen_steps += 100
+                extra_prompt_appended = True
+
+  
+            # track how many steps in the current phase  
+            self.phase_step_count += 1  
+            step_end_time = time.perf_counter()
+            print(f"step time: {step_end_time - step_begin_time} s")
+
+
+
+        if return_logits_for_analysis:
+            for k in analysis_data.keys():
+                if k.startswith('logits'):
+                    analysis_data[k] = torch.cat(analysis_data[k], dim=1)
+            return input_ids, analysis_data
+
+        return input_ids
+
+    def _update_model_kwargs_for_generation(
+        self,
+        outputs,
+        kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        # update past_key_values
+        kwargs["past_key_values"] = outputs.past_key_values
+        # https://github.com/huggingface/transformers/issues/36151
+        kwargs["cache_position"] = torch.tensor([kwargs["attention_mask"].shape[1]]).to(outputs.logits.device)
+        # kwargs["cache_position"] = torch.full((kwargs["attention_mask"].shape[0],), kwargs["attention_mask"].shape[1], dtype=torch.long, device=outputs.logits.device)
+
+        # update attention mask
+        if "attention_mask" in kwargs:
+            attention_mask = kwargs["attention_mask"]
+            kwargs["attention_mask"] = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
+            )
+
+        return kwargs
+
+    def is_thinking_token(self, token):
+        return token.strip() in ["Wait", "Alternatively", "Hmm"]
+        # return token.strip() in ["Wait", "Alternatively", "But", "However", "Perhaps", "Maybe", "Instead", "Alternative", "Hmm"]
+
