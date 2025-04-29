@@ -1,13 +1,21 @@
 model=$1
 alpha_strategy=$2
 dataset=$3
+experiment_id=$4
+
 
 if [[ "$model" == *"small"* ]]; then
     gpu_cnt=1
-    batch_sz=16
+    batch_sz=8
 else
     gpu_cnt=4
     batch_sz=8
+fi
+
+if [[ "$dataset" == *"train"* ]]; then
+	experiment_id=0
+elif [[ "$experiment_id" = "" ]]; then 
+	experiment_id=\$(uuidgen)
 fi
 
 # if [[ "$dataset" == "MATH_hard_test" ]]; then
@@ -45,12 +53,13 @@ source ~/.bashrc
 conda activate proxy-tuning-llama
 
 batch_sz=${batch_sz}
+experiment_id=${experiment_id}
 dataset=\"${dataset}\"
 # Evaluating DExperts with chat expert
 my_data_dir=\"data/eval/\${dataset}/\"
 
 large_size=\"32\"
-small_size=\"7\"
+small_size=\"1.5\"
 large_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${large_size}B\"
 small_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${small_size}B\"
 large_base_model=\"Qwen/Qwen2.5-\${large_size}B\"
@@ -71,11 +80,6 @@ small_base_model=\"Qwen/Qwen2.5-Math-\${small_size}B\"
 # small_base_model=\"meta-llama/Llama-3.1-\${small_size}B\"
 
 
-if [[ "$dataset" == *"train"* ]]; then
-	experiment_id=0
-else
-	experiment_id=\$(uuidgen)
-fi
 
 if [[ \"${model}\" == \"DExperts\" ]]; then
 	results_dir=\"results/\${dataset}/dexperts-S\${small_size}B-L\${large_size}B/${alpha_strategy}/\${experiment_id}\"
