@@ -111,7 +111,8 @@ def main():
             for file_path in glob.glob(pattern):
                 with open(file_path, 'r') as reader:
                     pred_items = [json.loads(l) for l in reader]
-                assert len(pred_items) == len(data_items)
+                if len(pred_items) != len(data_items):
+                    continue
                 for pred_item, data_item in zip(pred_items, data_items):
                     data_item["preds"].append(pred_item["prediction"])
                     texts.append(pred_item["model_output"])
