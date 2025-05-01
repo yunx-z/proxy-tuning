@@ -113,6 +113,8 @@ def main():
                     pred_items = [json.loads(l) for l in reader]
                 if len(pred_items) != len(data_items):
                     continue
+                if len(data_items[0]["preds"]) >= 8:
+                    break
                 for pred_item, data_item in zip(pred_items, data_items):
                     data_item["preds"].append(pred_item["prediction"])
                     texts.append(pred_item["model_output"])

@@ -6,7 +6,7 @@ for dataset in "${dataset_list[@]}"; do
 	if [[ "$dataset" == *"MATH_hard_train"* ]]; then
 	    total_runs=1 # training data sampling
 	else
-	    total_runs=16 # evaluation
+	    total_runs=8 # evaluation
 	fi
 	# total_runs=1
 
