@@ -9,13 +9,13 @@ if [[ "$model" == *"small"* ]]; then
     batch_sz=8
 else
     gpu_cnt=4
-    batch_sz=8
+    batch_sz=1
 fi
 
 if [[ "$dataset" == *"train"* ]]; then
 	experiment_id=0
 elif [[ "$experiment_id" = "" ]]; then 
-	experiment_id=\$(uuidgen)
+	experiment_id=$(uuidgen)
 fi
 
 # if [[ "$dataset" == "MATH_hard_test" ]]; then
@@ -59,7 +59,7 @@ dataset=\"${dataset}\"
 my_data_dir=\"data/eval/\${dataset}/\"
 
 large_size=\"32\"
-small_size=\"1.5\"
+small_size=\"7\"
 large_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${large_size}B\"
 small_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${small_size}B\"
 large_base_model=\"Qwen/Qwen2.5-\${large_size}B\"
