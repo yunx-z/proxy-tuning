@@ -11,11 +11,11 @@ for dataset in "${dataset_list[@]}"; do
 
 	for i in $(seq 1 $total_runs); do
 		# spgpu2
-		bash launch.sh "dexperts" "constant" "$dataset" "$i"
+		bash launch.sh "dexperts" "$dataset" "$i"
 
 		models=("small_expert_model" "large_base_model" "large_expert_model")
 		for model in "${models[@]}"; do
-			bash launch.sh "$model" "" "$dataset" "$i"
+			bash launch.sh "$model" "$dataset" "$i"
 		done
 
 		# spgpu
