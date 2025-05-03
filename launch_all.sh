@@ -1,6 +1,5 @@
-# for dataset in "aime2024" "aime2025" "MATH100"; do
 # dataset_list=(MATH_hard_train_{00..48})
-dataset_list=("MATH_hard_test") # "aime2025" "MATH_hard_test")
+dataset_list=("amc23") # "aime2024" "aime2025" "MATH_hard_test"
 
 for dataset in "${dataset_list[@]}"; do
 	if [[ "$dataset" == *"MATH_hard_train"* ]]; then
@@ -12,7 +11,7 @@ for dataset in "${dataset_list[@]}"; do
 
 	for i in $(seq 1 $total_runs); do
 		# spgpu2
-		bash launch.sh "DExperts" "constant" "$dataset" "$i"
+		bash launch.sh "dexperts" "constant" "$dataset" "$i"
 
 		models=("small_expert_model" "large_base_model" "large_expert_model")
 		for model in "${models[@]}"; do

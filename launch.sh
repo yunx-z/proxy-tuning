@@ -1,8 +1,8 @@
 model=$1
-alpha_strategy=$2
-dataset=$3
-experiment_id=$4
+dataset=$2
+experiment_id=$3
 
+alpha_strategy="constant"
 
 if [[ "$model" == *"small"* ]]; then
     gpu_cnt=1
@@ -41,6 +41,7 @@ echo """#!/bin/bash
 #SBATCH --ntasks=1                # Number of tasks, typically set to 1 for single GPU jobs
 #SBATCH --cpus-per-gpu=4         # Number of CPU cores per task
 #SBATCH --mem=43GB                 # Amount of memory per node (e.g., 16 GB)
+##SBATCH --exclude=gl1506
 ##SBATCH --dependency=afterany:24617369:24617368
 
 echo \"My job ID is \$SLURM_JOB_ID\"
@@ -61,7 +62,18 @@ my_data_dir=\"data/eval/\${dataset}/\"
 large_size=\"32\"
 small_size=\"1.5\"
 large_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${large_size}B\"
-small_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${small_size}B\"
+small_rft_expert_model=\"checkpoints/small_rft_expert_model\"
+small_pft_expert_model=\"checkpoints/small_pft_expert_model\"
+small_distill_expert_model=\"checkpoints/small_distill_expert_model\"
+if [[ \"${model}\" == \"dexperts-rft\" ]]; then
+	small_expert_model=\${small_rft_expert_model}
+elif [[ \"${model}\" == \"dexperts-distill\" ]]; then
+	small_expert_model=\${small_distill_expert_model}
+elif [[ \"${model}\" == \"dexperts-pft\" ]]; then
+	small_expert_model=\${small_pft_expert_model}
+else
+	small_expert_model=\"deepseek-ai/DeepSeek-R1-Distill-Qwen-\${small_size}B\"
+fi
 large_base_model=\"Qwen/Qwen2.5-\${large_size}B\"
 small_base_model=\"Qwen/Qwen2.5-Math-\${small_size}B\"
 
@@ -81,8 +93,8 @@ small_base_model=\"Qwen/Qwen2.5-Math-\${small_size}B\"
 
 
 
-if [[ \"${model}\" == \"DExperts\" ]]; then
-	results_dir=\"results/\${dataset}/dexperts-S\${small_size}B-L\${large_size}B/${alpha_strategy}/\${experiment_id}\"
+if [[ \"${model}\" == *\"dexperts\"* ]]; then
+	results_dir=\"results/\${dataset}/${model}-S\${small_size}B-L\${large_size}B/${alpha_strategy}/\${experiment_id}\"
 	echo \"Results dir: \${results_dir}\"
 	python -m eval.gsm.run_eval \
 	    --max_new_tokens ${max_generation_token} \

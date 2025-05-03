@@ -169,9 +169,10 @@ def load_lm_and_tokenizer(
     model_kwargs = {
         'device_map': device_map,
         'offload_folder': 'offload_folder',
-        'torch_dtype': torch.float16,
+        'torch_dtype': torch.bfloat16,
         'offload_state_dict': True,
-        'load_in_8bit': load_in_8bit
+        'load_in_8bit': load_in_8bit,
+        'trust_remote_code': True,
     }
     model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
     if convert_to_half:
@@ -218,6 +219,7 @@ def load_dexperts_model_and_tokenizer(
         'torch_dtype': torch.bfloat16,
         'offload_state_dict': True,
         'load_in_8bit': load_in_8bit,
+        'trust_remote_code': True,
     }
 
     print(f"Loading tokenizer from: {base_model_name_or_path}")
