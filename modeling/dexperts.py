@@ -93,6 +93,7 @@ class DExpertsLlama:
             a_model = AutoModelForCausalLM.from_pretrained(
                 model_name_or_path, **_model_kwargs
             )
+            print(model_name_or_path, "max_position_embeddings:", a_model.config.max_position_embeddings, flush=True)
             return a_model.eval()
         else:
             return None
@@ -314,26 +315,28 @@ class DExpertsLlama:
                     self.alpha = 0
                 else:
                     # Simplified alpha calculation based on strategy
-                    current_alpha_strategy = self.alpha_strategy if self.alpha_strategy else "constant1.0" # Default to constant 1.0
+                    current_alpha_strategy = self.alpha_strategy if self.alpha_strategy else "constant" # Default to constant 1.0
 
                     if current_alpha_strategy.startswith("constant"):
                         try:
                             self.alpha = float(current_alpha_strategy.replace("constant", ""))
                         except ValueError:
                             self.alpha = 1.0 # Default if format is wrong
+                    elif current_alpha_strategy == "warmup":
+                        self.alpha = 0.0 if gen_steps < 100 else 1.0
                     elif current_alpha_strategy.startswith("cycle"):
                         T = int(current_alpha_strategy.replace("cycle", "") or 100) # Default cycle length 100
                         self.alpha = 1.0 if (gen_steps // T) % 2 != 0 else 0.0 # Cycle between 0 and 1
                     elif current_alpha_strategy.startswith("2cycles"):
-                         items = current_alpha_strategy.split('-')
-                         T0 = int(items[1]) if len(items) > 1 else 400
-                         T1 = int(items[2]) if len(items) > 2 else 100
-                         # Ensure Ts are multiples of 100? Original code asserted this.
-                         # T0 = (T0 // 100) * 100
-                         # T1 = (T1 // 100) * 100
-                         cycle_len_steps = T0 + T1
-                         step_in_cycle = gen_steps % cycle_len_steps
-                         self.alpha = 0.0 if step_in_cycle < T0 else 1.0
+                        items = current_alpha_strategy.split('-')
+                        T0 = int(items[1]) if len(items) > 1 else 400
+                        T1 = int(items[2]) if len(items) > 2 else 100
+                        # Ensure Ts are multiples of 100? Original code asserted this.
+                        # T0 = (T0 // 100) * 100
+                        # T1 = (T1 // 100) * 100
+                        cycle_len_steps = T0 + T1
+                        step_in_cycle = gen_steps % cycle_len_steps
+                        self.alpha = 0.0 if step_in_cycle < T0 else 1.0
                     elif current_alpha_strategy.startswith("random"):
                         prob = float(current_alpha_strategy.replace("random", "") or 0.5)
                         self.alpha = 1.0 if random.random() < prob else 0.0
@@ -341,15 +344,15 @@ class DExpertsLlama:
                         # Note: overriding_event_occurred needs to be determined *after* logits comparison
                         self._update_phase(overriding_event_occurred, extra_prompt_appended) # self.alpha is set inside _update_phase
                     elif current_alpha_strategy == "ppt":
-                         if curr_episode > self.MAX_EPISODE:
-                             self.alpha = 0
-                             # Optimization: potentially unload experts (consider implications if generate is called again)
-                             # If unloading, ensure they are reloaded at the start of generate if needed.
-                             # self.expert = None; self.antiexpert = None; torch.cuda.empty_cache() # Be cautious with this
-                         else:
-                             self.alpha = 1.0 # Assume alpha=1 during active PPT episodes
+                        if curr_episode > self.MAX_EPISODE:
+                            self.alpha = 0
+                            # Optimization: potentially unload experts (consider implications if generate is called again)
+                            # If unloading, ensure they are reloaded at the start of generate if needed.
+                            # self.expert = None; self.antiexpert = None; torch.cuda.empty_cache() # Be cautious with this
+                        else:
+                            self.alpha = 1.0 # Assume alpha=1 during active PPT episodes
                     elif current_alpha_strategy in ["expert_logit_only", "expert_keyword_logits_only"]:
-                         self.alpha = 1.0 # Alpha is used differently here, just enables expert pathway
+                        self.alpha = 1.0 # Alpha is used differently here, just enables expert pathway
                     else: # Default or unknown strategy
                         self.alpha = 1.0
 
@@ -411,12 +414,18 @@ class DExpertsLlama:
                     # Clone base logits
                     dexperts_next_token_logits = base_next_token_logits.clone()
                     # Apply DExperts modification safely up to common vocab size
-                    common_vocab = min(vocab_size, expert_next_token_logits.shape[-1], antiexpert_next_token_logits.shape[-1])
+                    # common_vocab = min(vocab_size, expert_next_token_logits.shape[-1], antiexpert_next_token_logits.shape[-1])
+                    common_vocab = self.tokenizer.vocab_size
+                    delta_logits = expert_next_token_logits[..., :common_vocab] - antiexpert_next_token_logits[..., :common_vocab]
+                    delta_clipped = torch.clamp(delta_logits, -10, 10)
                     dexperts_next_token_logits[..., :common_vocab] = (
                         base_next_token_logits[..., :common_vocab] +
-                        effective_alpha * (expert_next_token_logits[..., :common_vocab] - antiexpert_next_token_logits[..., :common_vocab])
+                        effective_alpha * delta_clipped
                     )
                     next_token_logits = dexperts_next_token_logits
+                    # print("input_ids.shape", input_ids.shape[-1], flush=True)
+                    # print("base_logits.std()", base_next_token_logits[..., :common_vocab].std(), flush=True)
+                    # print("delta_logits.std()", delta_logits.std(), flush=True)
 
                 # Condition check for expert_logit_only / expert_keyword_logits_only strategies
                 elif effective_alpha != 0 and expert_next_token_logits is not None and antiexpert_next_token_logits is None:

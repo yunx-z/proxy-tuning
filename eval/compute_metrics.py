@@ -20,6 +20,7 @@ large_size="32"
 large_base_model=f"Qwen_Qwen2.5-{large_size}B"
 large_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{large_size}B"
 models += [small_expert_model, large_base_model, large_expert_model]
+models += [f"checkpoints_{m}" for m in ["small_distill_expert_model", "small_pft_expert_model", "small_rft_expert_model"]]
 models += [f"dexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 models += [f"dexperts-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 models += [f"TwoBody-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
