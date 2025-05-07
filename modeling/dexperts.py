@@ -265,6 +265,10 @@ class DExpertsLlama:
         # --- Generation Loop Setup ---
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
         eos_token_id_tensor = torch.tensor([self.tokenizer.eos_token_id], device=input_ids.device) if self.tokenizer.eos_token_id else None
+        # last emitted token for every batch element (start with last prompt token)
+        last_tokens = input_ids[:, -1].clone()
+        # how many times in a row we have seen that same token
+        repeat_counts = torch.zeros_like(unfinished_sequences)
 
         if return_logits_for_analysis:
             analysis_data = defaultdict(list)
@@ -414,13 +418,13 @@ class DExpertsLlama:
                     # Clone base logits
                     dexperts_next_token_logits = base_next_token_logits.clone()
                     # Apply DExperts modification safely up to common vocab size
-                    # common_vocab = min(vocab_size, expert_next_token_logits.shape[-1], antiexpert_next_token_logits.shape[-1])
-                    common_vocab = self.tokenizer.vocab_size
+                    common_vocab = min(vocab_size, expert_next_token_logits.shape[-1], antiexpert_next_token_logits.shape[-1])
+                    # common_vocab = self.tokenizer.vocab_size
                     delta_logits = expert_next_token_logits[..., :common_vocab] - antiexpert_next_token_logits[..., :common_vocab]
-                    delta_clipped = torch.clamp(delta_logits, -10, 10)
+                    # delta_clipped = torch.clamp(delta_logits, -10, 10)
                     dexperts_next_token_logits[..., :common_vocab] = (
                         base_next_token_logits[..., :common_vocab] +
-                        effective_alpha * delta_clipped
+                        effective_alpha * delta_logits
                     )
                     next_token_logits = dexperts_next_token_logits
                     # print("input_ids.shape", input_ids.shape[-1], flush=True)
@@ -497,6 +501,26 @@ class DExpertsLlama:
 
                 # --- Handle Finished Sequences ---
                 next_tokens = next_tokens * unfinished_sequences + self.tokenizer.pad_token_id * (1 - unfinished_sequences)
+                # --------- NEW ------------
+                same_as_last = (next_tokens == last_tokens) & (unfinished_sequences == 1)
+
+                # increment counters where repeat continues, else reset to 1
+                repeat_counts = torch.where(same_as_last,
+                                            repeat_counts + 1,
+                                            torch.ones_like(repeat_counts))
+
+                # if a sequence has repeated the same token 10 times, emit EOS instead
+                hit_limit = (repeat_counts >= 10) & (unfinished_sequences == 1)
+                if hit_limit.any():
+                    next_tokens = torch.where(hit_limit,
+                                              torch.full_like(next_tokens, self.tokenizer.eos_token_id),
+                                              next_tokens)
+                    # mark those sequences as finished right away
+                    unfinished_sequences = unfinished_sequences * (~hit_limit)
+
+                # update last_tokens for the next step
+                last_tokens = next_tokens.clone()
+                # ---------------------------
 
                 # --- Logging ---
                 # Log based on the first sequence in the batch for simplicity

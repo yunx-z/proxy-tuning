@@ -9,7 +9,7 @@ from eval.math_equivalence import is_equiv
 
 models = []
 # alpha_strategies = ["constant", "ppt", "cycle100", "random0.5", "override_annealing"] 
-alpha_strategies = ["constant", "constant1.0", "constant0.5", "constant0.25", "constant2.0", "expert_logit_only", "expert_keyword_logits_only"] 
+alpha_strategies = ["warmup", "constant", "constant1.0", "constant0.5", "constant0.25", "constant2.0", "expert_logit_only", "expert_keyword_logits_only"] 
 
 small_size="1.5"
 small_base_model=f"Qwen_Qwen2.5-Math-{small_size}B"
@@ -20,9 +20,14 @@ large_size="32"
 large_base_model=f"Qwen_Qwen2.5-{large_size}B"
 large_expert_model=f"deepseek-ai_DeepSeek-R1-Distill-Qwen-{large_size}B"
 models += [small_expert_model, large_base_model, large_expert_model]
-models += [f"checkpoints_{m}" for m in ["small_distill_expert_model", "small_pft_expert_model", "small_rft_expert_model"]]
+# models += [f"checkpoints_{m}" for m in ["small_distill_expert_model", "small_pft_expert_model", "small_rft_expert_model"]]
 models += [f"dexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 models += [f"dexperts-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+models += [f"dexperts-rft-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+models += [f"dexperts-pft-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+models += [f"dexperts-distill-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+models += [f"dexperts-early-pft-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
+models += [f"dexperts-50-pft-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 models += [f"TwoBody-S{small_size}B-L{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 # models += [f"bexperts-{large_size}B/{alpha_strategy}" for alpha_strategy in alpha_strategies]
 large_size="72"
@@ -95,7 +100,11 @@ def majority(data_items):
     maj_correct_scores = list()
     for item in data_items:
         pred_answer_frequencies = count_frequencies_with_custom_equal(item['preds'], is_equiv)
-        voted_answer = pred_answer_frequencies[0][0]
+        try:
+            voted_answer = pred_answer_frequencies[0][0]
+        except Exception as e:
+            print(item)
+            exit(0)
         maj_correct_score = int(is_equiv(voted_answer, item["answer"]))
         maj_correct_scores.append(maj_correct_score)
     return sum(maj_correct_scores) / len(maj_correct_scores)
@@ -112,8 +121,9 @@ def main():
             for file_path in glob.glob(pattern):
                 with open(file_path, 'r') as reader:
                     pred_items = [json.loads(l) for l in reader]
-                if len(pred_items) != len(data_items):
+                if len(pred_items) < len(data_items):
                     continue
+                pred_items = pred_items[:len(data_items)]
                 if len(data_items[0]["preds"]) >= 8:
                     break
                 for pred_item, data_item in zip(pred_items, data_items):
@@ -121,6 +131,8 @@ def main():
                     texts.append(pred_item["model_output"])
             if glob.glob(pattern): 
                 k = len(data_items[0]["preds"])
+                if k == 0:
+                    continue
                 pass_at_1 = pass_at_k(data_items, k=1)
                 majority_at_k = majority(data_items)
                 avg_tokens = average_token_count(texts)
