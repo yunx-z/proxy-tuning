@@ -6,6 +6,7 @@ import numpy as np
 from transformers import AutoTokenizer
 from eval.custom_counter import count_frequencies_with_custom_equal
 from eval.math_equivalence import is_equiv
+from eval.math_util import my_answer_extraction
 
 models = []
 # alpha_strategies = ["constant", "ppt", "cycle100", "random0.5", "override_annealing"] 
@@ -74,6 +75,17 @@ def average_token_count(texts):
     avg_tokens = total_tokens / len(texts) if texts else 0
     return avg_tokens
 
+def truncate_string_by_tokens(text, max_tokens=None):
+    # Tokenize the input text
+    input_ids = tokenizer.encode(text, add_special_tokens=False)
+    
+    # Truncate to first N tokens
+    truncated_ids = input_ids[:max_tokens]
+    
+    # Decode back to string
+    truncated_text = tokenizer.decode(truncated_ids, skip_special_tokens=True)
+    return truncated_text
+
 def get_data_items(data_file):
     with open(data_file, 'r') as reader:
         data_items = [json.loads(l) for l in reader]
@@ -132,8 +144,10 @@ def main():
                 if len(data_items[0]["preds"]) >= 8:
                     break
                 for pred_item, data_item in zip(pred_items, data_items):
-                    data_item["preds"].append(pred_item["prediction"])
-                    texts.append(pred_item["model_output"])
+                    model_output_truncated = truncate_string_by_tokens(pred_item["model_output"], max_tokens=8192)
+                    model_pred = my_answer_extraction(model_output_truncated)  
+                    data_item["preds"].append(model_pred)
+                    texts.append(model_output_truncated)
             if glob.glob(pattern): 
                 k = len(data_items[0]["preds"])
                 if k == 0:
