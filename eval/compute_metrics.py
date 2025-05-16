@@ -10,7 +10,7 @@ from eval.math_util import my_answer_extraction
 
 models = []
 # alpha_strategies = ["constant", "ppt", "cycle100", "random0.5", "override_annealing"] 
-alpha_strategies = ["warmup", "constant", "constant1.0", "constant0.5", "constant0.25", "constant2.0", "expert_logit_only", "expert_keyword_logits_only"] 
+alpha_strategies = ["warmup", "constant", "constant1.0", "constant0.5", "constant1.5", "constant0.25", "constant2.0", "expert_logit_only", "expert_keyword_logits_only"] 
 
 small_size="1.5"
 small_base_model=f"Qwen_Qwen2.5-Math-{small_size}B"
@@ -127,7 +127,7 @@ def majority(data_items):
     return sum(maj_correct_scores) / len(maj_correct_scores)
 
 def main():
-    for dataset in ["aime2024", "aime2025", "MATH_hard_test"]:
+    for dataset in ["aime2024", "aime2025", "MATH_hard_test", "amc23"]:
         data_file = f"data/eval/{dataset}/test.jsonl"
 
         for model in models:
@@ -152,10 +152,11 @@ def main():
                 k = len(data_items[0]["preds"])
                 if k == 0:
                     continue
-                pass_at_1 = pass_at_k(data_items, k=1)
+                K_PASS = min(8, k)
+                pass_at_1 = pass_at_k(data_items, k=K_PASS)
                 majority_at_k = majority(data_items)
                 avg_tokens = average_token_count(texts)
-                print(f"{dataset}\t{model}\tpass@1 = {pass_at_1*100:.1f}\tmaj@{k} = {majority_at_k*100:.1f}\tavg_tokens = {avg_tokens:.0f}")
+                print(f"{dataset}\t{model}\tpass@{K_PASS} = {pass_at_1*100:.1f}\tmaj@{k} = {majority_at_k*100:.1f}\tavg_tokens = {avg_tokens:.0f}")
 
 
 
